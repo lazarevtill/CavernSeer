@@ -68,7 +68,7 @@ struct ScannerTabView: View {
                 Spacer()
 
                 if scanEnabled {
-                    saveOrCancel
+                    saveOrCancel.disabled(self.control.isSaving)
                 } else {
                     captureButton
                 }

@@ -26,6 +26,9 @@ class ScannerControlModel : ObservableObject {
     @Published
     public private(set) var scanEnabled = false
 
+    @Published
+    public private(set) var isSaving = false
+
     /** Indicates that the torch (onboard-light) is engaged. */
     @Published
     public private(set) var torchEnabled = false
@@ -92,6 +95,7 @@ class ScannerControlModel : ObservableObject {
         self.cancelScan() /// should've been called already but just make sure
 
         self.model = nil
+        self.isSaving = false
         self.torchEnabled = false
 
         self.renderingPassiveView = true
@@ -102,13 +106,20 @@ class ScannerControlModel : ObservableObject {
      * and cancel scan (returning to passive) when done.
      */
     func saveScan(scanStore: ScanStore) {
-        guard let model = self.model
-        else { fatalError("Call to saveScan() when no model is set") }
+        guard !isSaving, let model = self.model else { return }
+        isSaving = true
 
         model.saveScan(
             scanStore: scanStore,
-            message: { msg in self.message = msg },
-            done: { _ in self.cancelScan() }
+            message: { [weak self, weak model] msg in
+                guard let self = self, let model = model, self.model === model else { return }
+                self.message = msg
+            },
+            done: { [weak self, weak model] saved in
+                guard let self = self, let model = model, self.model === model else { return }
+                self.isSaving = false
+                if saved { self.cancelScan() }
+            }
         )
     }
 

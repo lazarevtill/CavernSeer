@@ -154,75 +154,64 @@ final class ScannerModel:
         }
     }
 
-    /// stop the scan and export all data to a `ScanFile`
+    /// Snapshot geometry on the session delegate queue, then write off the UI thread.
+    /// Keep the live mesh until a persistent save succeeds so errors are retryable.
     func saveScan(
         scanStore: ScanStore,
         message: @escaping (_: String) -> Void,
         done: @escaping (_: Bool) -> Void
     ) {
-        guard
-            let arView = self.arView,
-            let surveyLines = self.surveyLines
-        else {
+        #if !targetEnvironment(simulator)
+        guard let arView = self.arView, let surveyLines = self.surveyLines else {
+            message("The scanner is not ready yet.")
             done(false)
             return
         }
 
-        message("Starting save...")
+        let anchors = savedAnchors.snapshot
+        guard !anchors.isEmpty else {
+            message("No mesh captured yet. Move slowly along a well-lit surface and try again.")
+            done(false)
+            return
+        }
+
+        message("Saving…")
+        let endSnapshot = SnapshotAnchor(capturing: arView.session, suffix: "end")
         pause()
 
-        let startSnapshot = self.startSnapshot
-        let stations = self.surveyStations
-        let date = Date()
+        let lines = surveyLines.drawables.compactMap { $0 as? SurveyLineEntity }
+        guard let scanFile = ScanFile.captured(
+            meshAnchors: anchors,
+            startSnap: startSnapshot,
+            endSnap: endSnapshot,
+            date: Date(),
+            stations: surveyStations,
+            lines: lines
+        ) else {
+            resumeScan()
+            message("No usable mesh captured. Continue scanning and try again.")
+            done(false)
+            return
+        }
 
-        let savedAnchors = self.savedAnchors.copyAndClear()
-
-        #if !targetEnvironment(simulator)
-        arView.session.getCurrentWorldMap { /* no self */ worldMap, error in
-
-            message("Saving...")
-
-            guard let map = worldMap
-            else {
-                message("WorldMap Error: \(error!.localizedDescription)")
-                done(false)
-                return
-            }
-
-            let endAnchor = SnapshotAnchor(
-                capturing: arView.session,
-                suffix: "end"
-            )
-            if endAnchor == nil {
-                message("Failed to take snapshot")
-            }
-
-            let lines = surveyLines.drawables.compactMap {
-                $0 as? SurveyLineEntity
-            }
-
-            let scanFile = ScanFile(
-                map: map,
-                meshAnchors: savedAnchors,
-                startSnap: startSnapshot,
-                endSnap: endAnchor,
-                date: date,
-                stations: stations,
-                lines: lines,
-                location: nil)
-
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 _ = try scanStore.saveFile(file: scanFile)
-                message("Save successful!")
-                scanStore.update() {
-                    _ in done(true)
+                DispatchQueue.main.async {
+                    message("Scan saved.")
+                    scanStore.update { _ in done(true) }
                 }
             } catch {
-                message("Error: \(error.localizedDescription)")
-                done(false)
+                let description = error.localizedDescription
+                DispatchQueue.main.async { [weak self] in
+                    self?.resumeScan()
+                    message("Couldn't save: \(description). Your scan is still open; try again.")
+                    done(false)
+                }
             }
         }
         #else
+        message("LiDAR capture is unavailable in the simulator.")
         done(false)
         #endif
     }
@@ -233,9 +222,10 @@ final class ScannerModel:
         #endif
     }
 
-    private func unpause() {
+    private func resumeScan() {
         #if !targetEnvironment(simulator)
-        arView?.session.run(arView!.session.configuration!)
+        guard let arView = self.arView, let configuration = scanConfiguration else { return }
+        arView.session.run(configuration)
         #endif
     }
 
@@ -257,12 +247,12 @@ final class ScannerModel:
         arView.environment.sceneUnderstanding.options = [
             .occlusion
         ]
+        arView.session.delegateQueue = .main
+        arView.session.delegate = self
         arView.session.run(
             scanConfiguration,
             options: self.clearingOptions
         )
-
-        arView.session.delegate = self
         #endif
 
         setupGestures(arView: arView)

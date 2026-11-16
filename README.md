@@ -5,9 +5,25 @@
 
 Designed for cave and shelter surveying, CavernSeer leverages the LiDAR scanner of the 2020 iPad Pro and the iPhone 12 Pro, and RealityKit's scene reconstruction, to generate relatively-accurate 3D meshes of real-world spaces and render them in various convenient ways.
 
+## Fork: more reliable local scan saving
+
+This version saves captured LiDAR geometry directly into the existing
+`.cavernseerscan` format, without requiring ARKit to build a relocalizable
+world map. The viewer uses bounds from the captured mesh. When there is no
+usable mesh or writing fails, the capture stays open so you can try again.
+Keep both the native scan and its OBJ export.
+
+To test: open `CavernSeer.xcodeproj` in Xcode, select your own signing team
+and a unique bundle identifier if needed, and run on a physical LiDAR iPhone.
+In Airplane Mode with Wi-Fi off, capture a short well-lit room or stair
+landing, save it, reopen it and share an OBJ to Files. Also try saving
+before a mesh appears: the scanner should stay open. Check one measured
+distance with a tape measure. The simulator cannot validate LiDAR capture.
+Do not use a phone scan as your only means of navigation.
+
 ### App Usage ###
 
-All iOS/iPadOS 14 devices can run the app and view existing scans shared by others, but devices with a LiDAR scanner (currently iPhone 12 Pros and newer iPad Pros) can capture new scans.
+Devices on iOS/iPadOS 15 or later can run the app and view existing scans shared by others, but devices with a LiDAR scanner (currently iPhone 12 Pros and newer iPad Pros) can capture new scans.
 
 ### Viewing ###
 
@@ -40,7 +56,7 @@ Clicking the center button again will complete and save the scan, which will app
 
 ## Getting Started (Development)
 
-Depends on **iOS 14** functionality and thus requires **Xcode 12** to build.
+The fork targets **iOS 15 or later** and was built with **Xcode 26.3**.
 No external dependencies are required, so you should be able to clone the repo into Xcode and build to your device.
 
 Due to particulars with the serialization of Apple-owned data structures, actions relating to scan files (e.g. importing or rendering) aren't supported in the simulator.

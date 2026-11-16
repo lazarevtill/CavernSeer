@@ -44,40 +44,74 @@ final class ScanFile : NSObject, NSSecureCoding, StoredFileProtocol {
 
     let stationPositionDict: [SurveyStation.Identifier: simd_float3]
 
-    /**
-     * Initializer from an `ARWorldMap` state and `AR` structures during scanning.
-     */
-    convenience init(
-        map: ARWorldMap,
-        meshAnchors: [ARMeshAnchor]?,
-        name: String? = nil,
+    /// Build a portable scan directly from captured geometry. Saving a mesh no
+    /// longer depends on ARKit being able to produce a relocalizable world map.
+    static func captured(
+        meshAnchors: [ARMeshAnchor],
         startSnap: SnapshotAnchor?,
         endSnap: SnapshotAnchor?,
-        date: Date = Date(),
+        date: Date,
         stations: [SurveyStationEntity],
-        lines: [SurveyLineEntity],
-        location: CLLocation?
-    ) {
-        /// use the passed-in anchors OR pull out only the *true* ARMeshAnchors from the map
-        let decidedMeshAnchors = meshAnchors
-            ?? map.anchors.compactMap { $0 as? ARMeshAnchor }
+        lines: [SurveyLineEntity]
+    ) -> ScanFile? {
+        let meshes = meshAnchors.map { CSMeshSlice(anchor: $0) }
+        var bounds = CaptureBounds()
+        for mesh in meshes where mesh.faces.count > 0 {
+            let vertices = mesh.vertices
+            bounds.includeVertices(
+                vertices.data, count: vertices.count, offset: vertices.offset,
+                stride: vertices.stride, transform: mesh.transform
+            )
+        }
+        guard let box = bounds.box else { return nil }
 
-        self.init(
-            name: name ?? Self.makeDefaultBaseName(
-                with: date,
-                as: Self.dateFormatter
-            ),
+        return ScanFile(
+            name: Self.makeDefaultBaseName(with: date, as: Self.dateFormatter),
             timestamp: date,
-            center: map.center,
-            extent: map.extent,
-            meshAnchors: decidedMeshAnchors
-                .map { CSMeshSlice(anchor: $0) },
+            center: box.center,
+            extent: box.extent,
+            meshAnchors: meshes,
             startSnapshot: startSnap.map { CSMeshSnapshot(snapshot: $0) },
             endSnapshot: endSnap.map { CSMeshSnapshot(snapshot: $0) },
             stations: stations.map { SurveyStation(entity: $0) },
             lines: lines.map { SurveyLine(entity: $0) },
-            location: location.map { CSLocation(loc: $0, manual: false) }
+            location: nil
         )
+    }
+
+    struct CaptureBounds {
+        private var low: SIMD3<Float>?
+        private var high: SIMD3<Float>?
+
+        mutating func includeVertices(
+            _ data: Data, count: Int, offset: Int, stride: Int, transform: simd_float4x4
+        ) {
+            let size = MemoryLayout<Float>.size
+            let xyzSize = 3 * size
+            guard count > 0, offset >= 0, offset <= data.count,
+                  stride >= xyzSize, data.count - offset >= xyzSize,
+                  count - 1 <= (data.count - offset - xyzSize) / stride
+            else { return }
+
+            data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+                for i in 0 ..< count {
+                    let p = offset + i * stride
+                    let x = bytes.loadUnaligned(fromByteOffset: p, as: Float.self)
+                    let y = bytes.loadUnaligned(fromByteOffset: p + size, as: Float.self)
+                    let z = bytes.loadUnaligned(fromByteOffset: p + 2 * size, as: Float.self)
+                    let world = transform * SIMD4<Float>(x, y, z, 1)
+                    let vertex = SIMD3<Float>(world.x, world.y, world.z)
+                    guard vertex.x.isFinite, vertex.y.isFinite, vertex.z.isFinite else { continue }
+                    low = simd_min(low ?? vertex, vertex)
+                    high = simd_max(high ?? vertex, vertex)
+                }
+            }
+        }
+
+        var box: (center: SIMD3<Float>, extent: SIMD3<Float>)? {
+            guard let low = low, let high = high else { return nil }
+            return ((low + high) * 0.5, high - low)
+        }
     }
 
     required init?(coder: NSCoder) {

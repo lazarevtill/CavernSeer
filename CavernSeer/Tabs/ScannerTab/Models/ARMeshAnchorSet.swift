@@ -34,11 +34,7 @@ struct ARMeshAnchorSet {
         }
     }
 
-    mutating func copyAndClear() -> [ARMeshAnchor] {
-        let meshes = self.meshes
-        self.meshes.removeAll()
-        return meshes
-    }
+    var snapshot: [ARMeshAnchor] { meshes }
 
     mutating func clear() {
         self.meshes.removeAll()

@@ -7,6 +7,7 @@
 //
 
 import XCTest
+import simd
 @testable import CavernSeer
 
 class CavernSeerTests: XCTestCase {
@@ -31,4 +32,36 @@ class CavernSeerTests: XCTestCase {
         }
     }
 
+    func testCaptureBoundsUnionTransformedAndPaddedVertices() throws {
+        var bounds = ScanFile.CaptureBounds()
+        var transform = matrix_identity_float4x4
+        transform.columns.0 = SIMD4<Float>(0, 1, 0, 0)
+        transform.columns.1 = SIMD4<Float>(-1, 0, 0, 0)
+        transform.columns.3 = SIMD4<Float>(10, 20, 30, 1)
+
+        let padded: [Float] = [-99, 1, 2, 3, 99, 4, 5, 6, 99]
+        bounds.includeVertices(
+            padded.withUnsafeBytes { Data($0) },
+            count: 2, offset: 4, stride: 16, transform: transform
+        )
+        let other: [Float] = [2, 30, 40]
+        bounds.includeVertices(
+            other.withUnsafeBytes { Data($0) },
+            count: 1, offset: 0, stride: 12, transform: matrix_identity_float4x4
+        )
+
+        let box = try XCTUnwrap(bounds.box)
+        XCTAssertEqual(box.center, SIMD3<Float>(5, 25.5, 36.5))
+        XCTAssertEqual(box.extent, SIMD3<Float>(6, 9, 7))
+    }
+
+    func testCaptureBoundsRejectsTruncatedOrNonFiniteVertices() {
+        var bounds = ScanFile.CaptureBounds()
+        let input: [Float] = [.infinity, 2, 3]
+        let data = input.withUnsafeBytes { Data($0) }
+        bounds.includeVertices(data, count: 2, offset: 0, stride: 12, transform: matrix_identity_float4x4)
+        bounds.includeVertices(data, count: 1, offset: 0, stride: 12, transform: matrix_identity_float4x4)
+        bounds.includeVertices(data, count: 1, offset: -1, stride: 12, transform: matrix_identity_float4x4)
+        XCTAssertNil(bounds.box)
+    }
 }
