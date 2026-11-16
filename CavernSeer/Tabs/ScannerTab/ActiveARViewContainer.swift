@@ -11,12 +11,13 @@ import RealityKit /// ARView
 
 struct ActiveARViewContainer: UIViewRepresentable {
     weak var control: ScannerControlModel?
+    let scanStore: ScanStore
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
         arView.backgroundColor = UIColor.systemBackground
 
-        control?.model?.onViewAppear(arView: arView)
+        control?.model?.onViewAppear(arView: arView, scanStore: scanStore)
         return arView
     }
 
@@ -33,8 +34,8 @@ struct ActiveARViewContainer: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ arView: ARView, coordinator: Coordinator) {
-        arView.removeFromSuperview()
         coordinator.control?.scanDisappearing()
+        arView.removeFromSuperview()
     }
 }
 

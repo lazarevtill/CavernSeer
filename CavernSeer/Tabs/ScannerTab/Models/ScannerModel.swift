@@ -54,12 +54,66 @@ final class ScannerModel:
 
     var scanConfiguration: ARWorldTrackingConfiguration?
 
+    private weak var scanStore: ScanStore?
+    private let captureID = UUID()
+    private let captureDate = Date()
+    private let writeQueue = DispatchQueue(label: "CavernSeer.capture-write", qos: .utility)
+    private var checkpointTimer: Timer?
+    private var lifecycleSubscription: AnyCancellable?
+    private var checkpointPolicy = CheckpointPolicy()
+    private var meshRevision = 0
+    private var checkpointInFlight = false
+    private var finalSaveRequested = false
+    private var trackingEnded = false
+    private var onCheckpointStatus: ((String) -> Void)?
+
+    struct CheckpointPolicy {
+        static let interval: TimeInterval = 25
+        private(set) var lastDate: Date?
+        private(set) var anchorIDs: Set<UUID> = []
+        private(set) var revision: Int?
+
+        func shouldWrite(revision: Int, anchors: Set<UUID>, now: Date, urgent: Bool) -> Bool {
+            guard !anchors.isEmpty, revision != self.revision, anchorIDs.isSubset(of: anchors) else {
+                return false
+            }
+            return urgent || (lastDate.map { now.timeIntervalSince($0) >= Self.interval } ?? true)
+        }
+
+        mutating func didWrite(revision: Int, anchors: Set<UUID>, date: Date) {
+            self.lastDate = date
+            self.anchorIDs = anchors
+            self.revision = revision
+        }
+    }
+
+    /// A short OS background lease for an already assembled snapshot, not a
+    /// promise that iOS will allow an in-progress write to finish.
+    private final class CaptureWriteLease {
+        private var id = UIBackgroundTaskIdentifier.invalid
+
+        init() {
+            id = UIApplication.shared.beginBackgroundTask(withName: "Save CavernSeer capture") { [weak self] in
+                self?.finish()
+            }
+        }
+
+        func finish() {
+            guard id != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(id)
+            id = .invalid
+        }
+    }
+
     private var tapRecognizer: UITapGestureRecognizer?
     private var cancelBag = Set<AnyCancellable>()
 
     init(control: ScannerControlModel) {
 
         super.init(target: nil, action: nil)
+        self.onCheckpointStatus = { [weak control] status in
+            control?.updateCheckpointStatus(status)
+        }
 
         control.$meshEnabled.sink {
             [weak self] (mesh) in self?.showMesh(mesh)
@@ -77,7 +131,8 @@ final class ScannerModel:
             .store(in: &cancelBag)
     }
 
-    func onViewAppear(arView: ARView) {
+    func onViewAppear(arView: ARView, scanStore: ScanStore) {
+        self.scanStore = scanStore
         let surveyLines = DrawableContainer()
         let drawView = DrawOverlay(frame: arView.frame, toDraw: surveyLines)
 
@@ -98,9 +153,26 @@ final class ScannerModel:
         setupScanConfig()
 
         self.startScan()
+
+        #if !targetEnvironment(simulator)
+        let timer = Timer(timeInterval: 4, repeats: true) { [weak self] _ in self?.checkpoint() }
+        checkpointTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        lifecycleSubscription = NotificationCenter.default
+            .publisher(for: UIApplication.willResignActiveNotification)
+            .sink { [weak self] _ in self?.checkpoint(urgent: true) }
+        #endif
     }
 
     func onViewDisappear() {
+        checkpoint(urgent: true, refreshList: true)
+        checkpointTimer?.invalidate()
+        checkpointTimer = nil
+        lifecycleSubscription?.cancel()
+        lifecycleSubscription = nil
+        if Self.supportsTorch {
+            Self.toggleTorch(on: false)
+        }
         NSLayoutConstraint.deactivate(self.getConstraints())
 
         self.stopScan()
@@ -118,6 +190,7 @@ final class ScannerModel:
 
         self.scanConfiguration = nil
 
+        self.savedAnchors.clear()
         self.startSnapshot = nil
         self.surveyStations = []
         self.surveyLines = nil
@@ -154,6 +227,57 @@ final class ScannerModel:
         }
     }
 
+    /// Rolling, independently reopenable native backup per capture. Never
+    /// replace it with a snapshot that has lost previously committed anchors.
+    private func checkpoint(urgent: Bool = false, refreshList: Bool = false) {
+        #if !targetEnvironment(simulator)
+        guard !finalSaveRequested, !checkpointInFlight, let scanStore = scanStore,
+              let arView = arView, let surveyLines = surveyLines else { return }
+        let anchors = savedAnchors.snapshot
+        let ids = Set(anchors.map(\.identifier))
+        let revision = meshRevision
+        let now = Date()
+        guard checkpointPolicy.shouldWrite(revision: revision, anchors: ids, now: now, urgent: urgent) else {
+            if !checkpointPolicy.anchorIDs.isSubset(of: ids) {
+                onCheckpointStatus?("Tracking changed. The earlier recovery copy was kept.")
+            }
+            return
+        }
+
+        let lease = CaptureWriteLease()
+        let name = ScanFile.makeDefaultBaseName(with: captureDate, as: ScanFile.dateFormatter)
+        guard let file = ScanFile.captured(
+            meshAnchors: anchors, startSnap: startSnapshot,
+            endSnap: urgent ? SnapshotAnchor(capturing: arView.session, suffix: "end") : nil,
+            date: captureDate, stations: surveyStations,
+            lines: surveyLines.drawables.compactMap { $0 as? SurveyLineEntity },
+            name: "Recovery • " + name + " [" + String(captureID.uuidString.prefix(8)) + "]"
+        ) else { lease.finish(); return }
+        checkpointInFlight = true
+        let baseName = "recovery_" + captureID.uuidString
+        writeQueue.async { [weak self] in
+            let result = Result { try scanStore.saveRecoveryCheckpoint(file: file, baseName: baseName) }
+            DispatchQueue.main.async { [weak self] in
+                defer { lease.finish() }
+                self?.checkpointInFlight = false
+                switch result {
+                case .success:
+                    self?.checkpointPolicy.didWrite(revision: revision, anchors: ids, date: Date())
+                    let savedAt = Date().formatted(date: .omitted, time: .standard)
+                    if self?.trackingEnded == true {
+                        self?.onCheckpointStatus?("Tracking ended. Recovery copy saved at \(savedAt).")
+                    } else {
+                        self?.onCheckpointStatus?("Recovery copy saved at \(savedAt).")
+                    }
+                    if refreshList || self?.arView == nil { scanStore.update() }
+                case .failure:
+                    self?.onCheckpointStatus?("Recovery write failed. Previous recovery copies are unchanged.")
+                }
+            }
+        }
+        #endif
+    }
+
     /// Snapshot geometry on the session delegate queue, then write off the UI thread.
     /// Keep the live mesh until a persistent save succeeds so errors are retryable.
     func saveScan(
@@ -176,6 +300,8 @@ final class ScannerModel:
         }
 
         message("Saving…")
+        finalSaveRequested = true
+        let lease = CaptureWriteLease()
         let endSnapshot = SnapshotAnchor(capturing: arView.session, suffix: "end")
         pause()
 
@@ -184,27 +310,34 @@ final class ScannerModel:
             meshAnchors: anchors,
             startSnap: startSnapshot,
             endSnap: endSnapshot,
-            date: Date(),
+            date: captureDate,
             stations: surveyStations,
             lines: lines
         ) else {
+            finalSaveRequested = false
+            lease.finish()
             resumeScan()
             message("No usable mesh captured. Continue scanning and try again.")
             done(false)
             return
         }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        let selfCaptureID = captureID.uuidString
+        writeQueue.async { [weak self] in
             do {
-                _ = try scanStore.saveFile(file: scanFile)
+                _ = try scanStore.saveFile(file: scanFile, baseName: scanFile.name + "_" + selfCaptureID)
                 DispatchQueue.main.async {
+                    lease.finish()
                     message("Scan saved.")
                     scanStore.update { _ in done(true) }
                 }
             } catch {
                 let description = error.localizedDescription
                 DispatchQueue.main.async { [weak self] in
+                    lease.finish()
+                    self?.finalSaveRequested = false
                     self?.resumeScan()
+                    self?.checkpoint(urgent: true)
                     message("Couldn't save: \(description). Your scan is still open; try again.")
                     done(false)
                 }
@@ -224,20 +357,14 @@ final class ScannerModel:
 
     private func resumeScan() {
         #if !targetEnvironment(simulator)
-        guard let arView = self.arView, let configuration = scanConfiguration else { return }
+        guard !trackingEnded, let arView = self.arView, let configuration = scanConfiguration else { return }
         arView.session.run(configuration)
         #endif
     }
 
     /// Start a new scan with `scanConfiguration`
     private func startScan() {
-        guard ScannerModel.supportsScan
-        else {
-            fatalError("""
-                Scene reconstruction (for mesh generation) requires a device
-                with a LiDAR Scanner, such as the fourth-generation iPad Pro.
-            """)
-        }
+        guard ScannerModel.supportsScan else { return }
         guard
             let arView = self.arView,
             let scanConfiguration = self.scanConfiguration
@@ -275,22 +402,44 @@ final class ScannerModel:
     }
 
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
-        if self.startSnapshot == nil {
-            self.startSnapshot = SnapshotAnchor(
-                capturing: session,
-                suffix: "start"
-            )
+        let meshes = anchors.compactMap { $0 as? ARMeshAnchor }
+        guard !trackingEnded, !meshes.isEmpty else { return }
+        if startSnapshot == nil {
+            startSnapshot = SnapshotAnchor(capturing: session, suffix: "start")
         }
-
-        savedAnchors.update(anchors.compactMap { $0 as? ARMeshAnchor })
+        savedAnchors.update(meshes)
+        meshRevision += 1
     }
 
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-        savedAnchors.update(anchors.compactMap { $0 as? ARMeshAnchor })
+        let meshes = anchors.compactMap { $0 as? ARMeshAnchor }
+        guard !trackingEnded, !meshes.isEmpty else { return }
+        savedAnchors.update(meshes)
+        meshRevision += 1
     }
 
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
-        savedAnchors.remove(anchors.compactMap { $0 as? ARMeshAnchor })
+        let meshes = anchors.compactMap { $0 as? ARMeshAnchor }
+        guard !trackingEnded, !meshes.isEmpty else { return }
+        savedAnchors.remove(meshes)
+        meshRevision += 1
+    }
+
+    func sessionWasInterrupted(_ session: ARSession) {
+        trackingEnded = true
+        checkpoint(urgent: true)
+        onCheckpointStatus?("Capture interrupted. Save this segment and start a new scan.")
+    }
+
+    func sessionInterruptionEnded(_ session: ARSession) {
+        // Don't mix new geometry after a loss of the original coordinate frame.
+        if trackingEnded { session.pause() }
+    }
+
+    func session(_ session: ARSession, didFailWithError error: Error) {
+        trackingEnded = true
+        checkpoint(urgent: true)
+        onCheckpointStatus?("Tracking stopped. Save this segment before starting again.")
     }
 
     private func setupScanConfig() {
@@ -346,23 +495,18 @@ final class ScannerModel:
         else { return }
 
         do {
-            let currentlyOn = device.isTorchActive
-            let max = AVCaptureDevice.maxAvailableTorchLevel
-
-            if currentlyOn != on {
-                try device.lockForConfiguration()
-                if on {
-                    try device.setTorchModeOn(level: max)
-                } else {
-                    device.torchMode = .off
-                }
-                device.unlockForConfiguration()
+            guard device.isTorchActive != on else { return }
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            if on {
+                try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
             } else {
-
+                device.torchMode = .off
             }
-
         } catch {
-            fatalError("Failed to toggle torch, \(error.localizedDescription)")
+            // The torch may become temporarily unavailable under thermal load or
+            // during camera interruption. Never crash and discard the capture.
+            debugPrint("Torch unavailable:", error.localizedDescription)
         }
     }
 
@@ -398,7 +542,7 @@ extension ScannerModel {
 
     @objc
     func handleTap(_ sender: UITapGestureRecognizer) {
-        guard let arView = self.arView else { return }
+        guard !trackingEnded, !finalSaveRequested, let arView = self.arView else { return }
 
         let tapLoc = sender.location(in: arView)
 
@@ -438,6 +582,7 @@ extension ScannerModel {
 
         let result = SurveyStationEntity(worldTransform: raycast.worldTransform)
         self.surveyStations.append(result)
+        meshRevision += 1
         arView.scene.addAnchor(result)
         arView.installGestures(for: result)
 

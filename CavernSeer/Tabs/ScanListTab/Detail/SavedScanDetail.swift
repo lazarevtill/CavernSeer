@@ -8,19 +8,9 @@
 
 import SwiftUI /// View
 
-class ObjTaskModel {
-    /** Set to cancel the task before it's been initialized */
-    var precancelled = false
-    var objTask: Task<(), Error>?
-}
-
 struct SavedScanDetail: View {
     var cache: ScanCacheFile
 
-    @EnvironmentObject
-    var objSerializer: ObjSerializer
-    @EnvironmentObject
-    var sharer: ShareSheetUtility
     @EnvironmentObject
     var settings: SettingsStore
     @EnvironmentObject
@@ -31,19 +21,20 @@ struct SavedScanDetail: View {
 
     @State
     private var model: SavedScanModel? = nil
-    @State
-    private var isPresentingRender = false
-    @State
-    private var isPresentingMap = false
-    @State
-    private var showObjPrompt = false
-    @State
-    private var showObjLoading = false
-    @State
-    private var fileExt = "obj"
+    private struct ShareArtifact: Identifiable {
+        let id = UUID()
+        let url: URL
+        let temporary: Bool
 
-    @State
-    private var taskModel = ObjTaskModel()
+        func cleanup() {
+            if temporary { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        }
+    }
+
+    @State private var artifact: ShareArtifact?
+    @State private var exportTask: Task<Void, Never>?
+    @State private var exportError: String?
+    @State private var showExportError = false
 
     private func loadModel() {
         if let err = self.cache.error {
@@ -56,7 +47,7 @@ struct SavedScanDetail: View {
             do {
                 self.model = try scanStore.getModel(url: url)
             } catch {
-                fatalError("Failed to find model: \(error.localizedDescription)")
+                self.error = error
             }
         }
     }
@@ -78,120 +69,63 @@ struct SavedScanDetail: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
-                Button(
-                    action: { self.sharer.share([model!.url]) },
-                    label: { Image(systemName: "square.and.arrow.up") }
-                )
-                Button(
-                    action: { self.showObjPrompt = true },
-                    label: { Image(systemName: "arrow.up.bin") }
-                )
-            }
-        }
-        /// for some reason, using `.confirmationDialog` breaks the two-alert timing
-        .alert(
-            Text("Export '\(model?.id ?? "scan")' to \(fileExt.uppercased()) file?"),
-            isPresented: $showObjPrompt
-        ) {
-            Button(role: .destructive) {
-                self.showObjPrompt = false
-                startGeneratingObj()
-            } label: {
-                Text("Export")
-            }
-            Button(role: .cancel) {
-                self.showObjPrompt = false
-            } label: {
-                Text("Cancel")
-            }
-        }
-        .alert(Text("Exporting..."), isPresented: $showObjLoading) {
-            Button(role: .cancel) {
-                if let objTask = self.taskModel.objTask {
-                    objTask.cancel()
-                    self.taskModel.objTask = nil
-                } else {
-                    // if you cancel before the task has initialized
-                    self.taskModel.precancelled = true
-                }
-            } label: {
-                Text("Cancel")
-            }
-        } message: {
-            Text("Generating '\(model?.id ?? "scan").\(fileExt)';")
-            Text("Once generated, share sheet will open file.")
-        }
-        .onAppear(perform: self.loadModel)
-    }
-
-    private func startGeneratingObj() {
-        guard let model = self.model else {
-            return
-        }
-
-        // give the UI time to close the alert which called this
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
-            self.generateObjAsync(model: model)
-        }
-    }
-
-    private func generateObjAsync(model: SavedScanModel) {
-        self.taskModel.precancelled = false
-
-        let temporaryDirectoryURL = FileManager.default.temporaryDirectory
-        let name = model.id
-            .replacingOccurrences(of: ":", with: "")
-            .replacingOccurrences(of: "/", with: "")
-
-
-        let tempUrl = temporaryDirectoryURL
-            .appendingPathComponent(name)
-            .appendingPathExtension(self.fileExt)
-
-        self.showObjLoading = true
-
-        // give the UI time to show the ObjLoading alert
-        DispatchQueue.global(qos: .userInitiated).async {
-
-            // create a task that can be cancelled
-            self.taskModel.objTask = Task {
-                try Task.checkCancellation()
-                if self.taskModel.precancelled {
-                    self.taskModel.precancelled = false
-                    return
-                }
-
-                do {
-                    try await objSerializer.serializeScanViaMDL(
-                        scan: model.scan,
-                        url: tempUrl
-                    )
-                } catch is CancellationError {
-                    return // cancelled
-                } catch {
-                    fatalError(
-                        "Error generating file: \(error.localizedDescription)"
-                    )
-                }
-
-                try Task.checkCancellation()
-
-                DispatchQueue.main.async {
-                    self.showObjLoading = false
-
-                    do {
-                        try Task.checkCancellation()
-                        self.taskModel.objTask = nil
-
-                        DispatchQueue.main.asyncAfter(
-                            deadline: .now() + 0.5
-                        ) {
-                            self.sharer.share([tempUrl])
+                if let model = model {
+                    if exportTask != nil {
+                        ProgressView()
+                        Button("Cancel") { exportTask?.cancel() }
+                    } else {
+                        Menu {
+                            Button("Backup ZIP (original + mesh)") {
+                                startExport(.backup, model: model)
+                            }
+                            Button("Original scan only") {
+                                artifact = ShareArtifact(url: model.url, temporary: false)
+                            }
+                            Button("OBJ mesh only") {
+                                startExport(.mesh, model: model)
+                            }
+                        } label: {
+                            Label("Export scan", systemImage: "square.and.arrow.up")
                         }
-                    } catch {
-                        return
                     }
                 }
+            }
+        }
+        .sheet(item: $artifact) { item in
+            ScanShareSheet(activityItems: [item.url]) { _, _, _, error in
+                item.cleanup()
+                if let error = error {
+                    self.exportError = error.localizedDescription
+                    self.showExportError = true
+                }
+            }
+        }
+        .alert("Couldn't export scan", isPresented: $showExportError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(exportError ?? "The original scan has not been changed.")
+        }
+        .onAppear(perform: self.loadModel)
+        .onDisappear { exportTask?.cancel() }
+    }
+
+    private func startExport(_ mode: ObjSerializer.Output, model: SavedScanModel) {
+        guard exportTask == nil else { return }
+        exportTask = Task { @MainActor in
+            defer { exportTask = nil }
+            do {
+                let url = try await ObjSerializer.prepare(mode, model: model)
+                let item = ShareArtifact(url: url, temporary: true)
+                if Task.isCancelled {
+                    item.cleanup()
+                } else {
+                    artifact = item
+                }
+            } catch is CancellationError {
+                // The staging directory is removed by the exporter.
+            } catch {
+                exportError = error.localizedDescription + "\nThe original scan has not been changed."
+                showExportError = true
             }
         }
     }

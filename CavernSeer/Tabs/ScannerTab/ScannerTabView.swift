@@ -61,6 +61,13 @@ struct ScannerTabView: View {
                 }
             }
 
+            if scanEnabled, !self.control.checkpointStatus.isEmpty {
+                Text(self.control.checkpointStatus)
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+            }
+
             // controls
             HStack(alignment: .bottom) {
                 debugButtons.frame(width: 100, height: controlFrameHeight)
@@ -112,9 +119,10 @@ struct ScannerTabView: View {
             Button(
                 action: { self.control.cancelScan() },
                 label: {
-                    Text("Cancel Scan")
+                    Text("Stop and attempt recovery")
                         .foregroundColor(.red)
-                        .padding(5)
+                        .font(.footnote)
+                    .padding(5)
                 }
             )
 
@@ -124,9 +132,11 @@ struct ScannerTabView: View {
                 label: {
                     Circle()
                         .foregroundColor(.secondary)
+                        .overlay(Image(systemName: "square.and.arrow.down").foregroundColor(Color(UIColor.systemBackground)))
                         .frame(width: 70, height: 70, alignment: .center)
                 }
             )
+            .accessibilityLabel("Save full scan and stop")
         }
     }
 

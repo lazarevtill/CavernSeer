@@ -76,24 +76,57 @@ extension StoreProtocol {
      * - Parameter file: the `FileType` instance being saved
      * - Parameter baseName: an optional base name to use for the saved file. Otherwise `url.lastPathComponent`.
      */
-    func saveFile(file: FileType, baseName: String? = nil) throws -> URL {
-        let cache = file.createCacheFile(thisFileURL: self.dataDirectory)
+    func saveFile(file: FileType, baseName: String? = nil, replaceExisting: Bool = false) throws -> URL {
+        let base = baseName ?? file.name
+        guard !base.isEmpty, base != ".", base != "..",
+              !base.contains("/"), !base.contains("\0")
+        else { throw CocoaError(.fileWriteInvalidFileName) }
 
-        let newSaveUrl = getSaveURL(file: file, baseName: baseName)
-        let dataData = try NSKeyedArchiver.archivedData(
-            withRootObject: file,
-            requiringSecureCoding: true
-        )
-        try dataData.write(to: newSaveUrl, options: [.atomic])
+        let data = try NSKeyedArchiver.archivedData(withRootObject: file, requiringSecureCoding: true)
+        if replaceExisting {
+            // This path is reserved for rolling checkpoints. Replacing the prior
+            // archive atomically leaves either the old or the new copy intact.
+            let destination = baseNameToURL(base: base)
+            try data.write(to: destination, options: .atomic)
+            let cache = file.createCacheFile(thisFileURL: destination)
+            saveCacheBestEffort(cache, at: cache.getCacheURL(cacheDir: cacheDirectory))
+            return destination
+        }
 
-        let cacheUrl = cache.getCacheURL(cacheDir: cacheDirectory)
-        let cacheData = try NSKeyedArchiver.archivedData(
-            withRootObject: cache,
-            requiringSecureCoding: true
-        )
-        try cacheData.write(to: cacheUrl)
+        let stagingURL = dataDirectory.appendingPathComponent(".pending-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: stagingURL) }
+        try data.write(to: stagingURL, options: .atomic)
 
-        return newSaveUrl
+        // A hard link publishes an already complete file on the same filesystem,
+        // and refuses to replace an existing destination even for concurrent saves.
+        var destination = baseNameToURL(base: base)
+        while true {
+            do {
+                try fileManager.linkItem(at: stagingURL, to: destination)
+                break
+            } catch {
+                guard fileManager.fileExists(atPath: destination.path) else { throw error }
+                if baseName != nil { throw FileSaveError.AlreadyExists }
+                destination = baseNameToURL(base: "\(base)-\(UUID().uuidString.lowercased())")
+            }
+        }
+
+        // A preview is disposable; the write above is authoritative.
+        let cache = file.createCacheFile(thisFileURL: destination)
+        saveCacheBestEffort(cache, at: cache.getCacheURL(cacheDir: cacheDirectory))
+        return destination
+    }
+
+    private func saveCacheBestEffort(_ cache: CacheType, at url: URL) {
+        do {
+            try fileManager.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            let data = try NSKeyedArchiver.archivedData(withRootObject: cache, requiringSecureCoding: true)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            debugPrint("Could not persist disposable preview:", error.localizedDescription)
+        }
     }
 
     /**
@@ -103,51 +136,29 @@ extension StoreProtocol {
      * If `completion` is provided, it is called in that main thread.
      */
     func update(completion: ((Error?)->())? = nil) {
-        var newCaches = caches
+        let previousCaches = Dictionary(caches.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         DispatchQueue.global(qos: .utility).async {
-            let newURLs = self.getStoreDirectoryURLs()
-
-            let alreadyLoadedCacheURLs = self.caches.map {
-                cache -> URL in self.getNormalizedRealUrl(cache: cache)
-            }
-            let alreadyInMemoryURLs = self.modelDataInMemory.map {
-                model in model.url
-            }
-
-            let indicesToRemove = IndexSet(
-                alreadyInMemoryURLs.indices.filter {
-                    (index: Int) -> Bool in
-                    let url = alreadyLoadedCacheURLs[index]
-                    return  !newURLs.contains(url)
+            do {
+                let urls = try self.getStoreDirectoryURLs()
+                let newCaches = urls.map { url in
+                    let id = url.deletingPathExtension().lastPathComponent
+                    do {
+                        return try previousCaches[id] ?? self.getCacheFile(realFileURL: url)
+                    } catch {
+                        return self.makeErrorCacheInstance(url, error: error)
+                    }
                 }
-            )
 
-            // add or remove caches based on new URLs
-            for change in newURLs.difference(from: alreadyLoadedCacheURLs) {
-                switch change {
-                    case let .remove(offset, _, _):
-                        newCaches.remove(at: offset)
-                    case let .insert(offset, url, _):
-                        do {
-                            let newDatum = try self.getCacheFile(
-                                realFileURL: url
-                            )
-                            newCaches.insert(newDatum, at: offset)
-                        } catch {
-                            let errCache = self.makeErrorCacheInstance(url, error: error)
-                            newCaches.insert(errCache, at: offset)
-                        }
+                DispatchQueue.main.async {
+                    let existingURLs = Set(urls)
+                    self.modelDataInMemory.removeAll { !existingURLs.contains($0.url) }
+                    self.caches = newCaches
+                    self.sortCaches()
+                    completion?(nil)
                 }
-            }
-
-            DispatchQueue.main.async {
-                self.modelDataInMemory.remove(atOffsets: indicesToRemove)
-
-                self.caches.removeAll()
-                self.caches.append(contentsOf: newCaches)
-                self.sortCaches()
-
-                completion?(nil)
+            } catch {
+                // Don't hide existing entries or crash if the directory cannot be read.
+                DispatchQueue.main.async { completion?(error) }
             }
         }
     }
@@ -235,34 +246,18 @@ extension StoreProtocol {
                 .appendingPathComponent(id)
                 .appendingPathExtension(CacheType.fileExtension)
 
-        if fileManager.fileExists(atPath: cacheFileURL.path) {
-            // if the cache file exists just get it
-            let data = try Data(contentsOf: cacheFileURL)
-            return try NSKeyedUnarchiver.unarchivedObject(
-                ofClass: CacheType.self,
-                from: data
-            )!
-        } else if fileManager.fileExists(atPath: realFileURL.path) {
-            debugPrint(
-                "Cache file doesn't exist but real file does",
-                realFileURL
-            )
-            // if we haven't cached the file yet, read it then write the cache
-            let model = try ModelType(url: realFileURL)
-            let modelFile = model.getFile()
-            let cacheFile = modelFile.createCacheFile(
-                thisFileURL: realFileURL
-            )
-            let cacheFileData = try NSKeyedArchiver.archivedData(
-                withRootObject: cacheFile,
-                requiringSecureCoding: true
-            )
-            try cacheFileData.write(to: cacheFileURL, options: [.atomic])
-            _ = self.getNormalizedRealUrl(cache: cacheFile)
-            return cacheFile
-        } else {
-            throw FileOpenError.noFileInArchive(url: realFileURL)
+        if let data = try? Data(contentsOf: cacheFileURL),
+           let cache = try? NSKeyedUnarchiver.unarchivedObject(ofClass: CacheType.self, from: data),
+           cache.id == id {
+            cache.realFileURL = realFileURL
+            return cache
         }
+
+        // A missing, stale, corrupt or unwritable cache must not hide a valid file.
+        let model = try ModelType(url: realFileURL)
+        let cache = model.getFile().createCacheFile(thisFileURL: realFileURL)
+        saveCacheBestEffort(cache, at: cacheFileURL)
+        return cache
     }
 
     /**
@@ -278,20 +273,13 @@ extension StoreProtocol {
                          appropriateFor: nil,
                          create: true)
                 .appendingPathComponent(directoryName, isDirectory: true)
-            let cacheDirectory = try
-                fileManager
-                .url(for: .cachesDirectory,
-                     in: .userDomainMask,
-                     appropriateFor: nil,
-                     create: true)
-                .appendingPathComponent(directoryName, isDirectory: true)
+            let cacheBase = (try? fileManager.url(
+                for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+            )) ?? fileManager.temporaryDirectory
+            let cacheDirectory = cacheBase.appendingPathComponent(directoryName, isDirectory: true)
 
-            try fileManager
-                .createDirectory(at: fileDirectory,
-                                 withIntermediateDirectories: true)
-            try fileManager
-                .createDirectory(at: cacheDirectory,
-                                 withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: fileDirectory, withIntermediateDirectories: true)
+            try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
 
             return (fileDirectory, cacheDirectory)
         } catch {
@@ -300,23 +288,11 @@ extension StoreProtocol {
         }
     }
 
-    internal func getStoreDirectoryURLs() -> [URL] {
-        do {
-            let contents = try fileManager
-                .contentsOfDirectory(
-                    at: dataDirectory,
-                    includingPropertiesForKeys: nil
-                )
-
-            return contents
-                .filter { url in url.pathExtension == fileExtension }
-                .sorted(by: { (url1, url2) -> Bool in
-                    url1
-                        .absoluteString
-                        .lexicographicallyPrecedes(url2.absoluteString)
-                })
-        } catch {
-            fatalError("Could not resolve dataDirectory contents")
-        }
+    internal func getStoreDirectoryURLs() throws -> [URL] {
+        try fileManager.contentsOfDirectory(
+            at: dataDirectory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        )
+        .filter { $0.pathExtension == fileExtension }
+        .sorted { $0.path < $1.path }
     }
 }

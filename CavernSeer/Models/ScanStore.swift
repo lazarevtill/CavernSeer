@@ -106,6 +106,15 @@ final class ScanStore : StoreProtocol {
         }
     }
 
+    /// Replace only the rolling recovery file for this capture, never a finished scan.
+    func saveRecoveryCheckpoint(file: ScanFile, baseName: String) throws -> URL {
+        let prefix = "recovery_"
+        guard baseName.hasPrefix(prefix),
+              UUID(uuidString: String(baseName.dropFirst(prefix.count))) != nil
+        else { throw CocoaError(.fileWriteInvalidFileName) }
+        return try saveFile(file: file, baseName: baseName, replaceExisting: true)
+    }
+
     func copySaveFile(scanFile: ScanFile, name: String, withLocation: Bool) throws -> URL {
         let newScan = ScanFile(
             name: name,

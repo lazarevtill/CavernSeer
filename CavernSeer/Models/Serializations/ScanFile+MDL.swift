@@ -1,133 +1,55 @@
-//
-//  ScanFile+MDL.swift
-//  CavernSeer
-//
-//  Created by Samuel Grush on 10/25/20.
-//  Copyright © 2020 Samuel K. Grush. All rights reserved.
-//
+// Geometry conversion for scan interchange.
+// Copyright © 2020 Samuel K. Grush. All rights reserved.
 
-import ARKit /// ARMeshGeometry, ARGeometrySource
-import MetalKit /// MTKMeshBufferAllocator
-
-extension ScanFile {
-    /**
-     * Generate an `MDLAsset` from the `ScanFile`'s mesh data.
-     * Async allows this to be cancelled part-way through the process.
-     */
-    func toMDLAsset(device: MTLDevice) async throws -> MDLAsset {
-
-        let allocator = MTKMeshBufferAllocator(device: device)
-
-        let mdlAsset = MDLAsset()
-
-        for anchor in self.meshAnchors {
-            try Task.checkCancellation()
-            await Task { [anchor] in
-                mdlAsset.add(
-                    anchor.toMDLMesh(
-                        allocator: allocator
-                    )
-                )
-            }.value
-        }
-
-        return mdlAsset
-    }
-}
+import ARKit
+import Foundation
 
 extension CSMeshSlice {
-    /**
-     * Generate an `MDLMesh` from the `CSMeshSlice` by simple buffer transforms.
-     *
-     * Essentially directly from StackOverflow users
-     *  [`swiftcoder`](https://stackoverflow.com/a/61104855) and
-     *  [`Alexander Gaidukov`](https://stackoverflow.com/a/61327580)
-     */
-    fileprivate func toMDLMesh(
-        allocator: MTKMeshBufferAllocator
-    ) -> MDLMesh {
-        let vertexData = Data.init(
-            bytes: self.vertices.transformVertices(self.transform),
-            count: self.vertices.stride * self.vertices.count
-        )
+    /// Stream an ARKit mesh in capture/world coordinates. Export must honor the
+    /// recorded stride, byte offset and index width, including for older scans.
+    func writeOBJ(vertexBase: Int, emit: (String) throws -> Void) throws {
+        let width = faces.bytesPerIndex
+        guard vertices.format == .float3, vertices.count > 0,
+              vertices.offset >= 0, vertices.offset <= vertices.data.count,
+              vertices.stride >= 12, vertices.data.count - vertices.offset >= 12,
+              vertices.count - 1 <= (vertices.data.count - vertices.offset - 12) / vertices.stride,
+              faces.primitiveType == .triangles, faces.indexCountPerPrimitive == 3,
+              (width == 2 || width == 4), faces.count > 0,
+              faces.count <= faces.data.count / (3 * width),
+              vertexBase <= Int.max - vertices.count
+        else { throw ObjSerializationError.InvalidMesh }
 
-        let vertexBuffer = allocator.newBuffer(
-            with: vertexData,
-            type: .vertex
-        )
-
-        let indexCount = self.faces.count * self.faces.indexCountPerPrimitive
-        let indexBuffer = allocator.newBuffer(
-            with: self.faces.data,
-            type: .index
-        )
-
-        let submesh = MDLSubmesh(
-            indexBuffer: indexBuffer,
-            indexCount: indexCount,
-            indexType: .uInt32,
-            geometryType: .triangles,
-            material: nil
-        )
-
-
-        let vertexDescriptor = MDLVertexDescriptor()
-        vertexDescriptor.addOrReplaceAttribute(
-            MDLVertexAttribute(
-                name: MDLVertexAttributePosition,
-                format: .float3,
-                offset: 0,
-                bufferIndex: 0
-            )
-        )
-        vertexDescriptor.layouts[0] = MDLVertexBufferLayout(
-            stride: self.vertices.stride
-        )
-
-        let mesh = MDLMesh(
-            vertexBuffer: vertexBuffer,
-            vertexCount: self.vertices.count,
-            descriptor: vertexDescriptor,
-            submeshes: [submesh]
-        )
-
-        return mesh
-    }
-}
-
-extension CSMeshGeometrySource {
-    /**
-     * Generate a sequence of coordinate-elements from the source's
-     * buffer of coordinates based on a `simd_float4x4` transformation matrix.
-     */
-    fileprivate func transformVertices(
-        _ transform: simd_float4x4
-    ) -> [Float] {
-        var result = [Float]()
-
-        for idx in 0..<self.count {
-
-            let vertexPointer = self.data.advanced(
-                by: self.offset + self.stride * idx
-            )
-
-            let vertexTransform = vertexPointer.withUnsafeBytes {
-                (pointer: UnsafePointer<Float>) -> simd_float4x4 in
-                let buffer = UnsafeBufferPointer(
-                    start: pointer,
-                    count: 3
-                )
-                var tmpTransform = matrix_identity_float4x4
-                tmpTransform.columns.3 = simd_float4(buffer[0], buffer[1], buffer[2], 1)
-                return tmpTransform
+        try vertices.data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            for i in 0..<vertices.count {
+                if i.isMultiple(of: 1024) { try Task.checkCancellation() }
+                let offset = vertices.offset + i * vertices.stride
+                let x = bytes.loadUnaligned(fromByteOffset: offset, as: Float.self)
+                let y = bytes.loadUnaligned(fromByteOffset: offset + 4, as: Float.self)
+                let z = bytes.loadUnaligned(fromByteOffset: offset + 8, as: Float.self)
+                let p = transform * SIMD4<Float>(x, y, z, 1)
+                guard p.x.isFinite, p.y.isFinite, p.z.isFinite else {
+                    throw ObjSerializationError.InvalidMesh
+                }
+                try emit("v \(p.x) \(p.y) \(p.z)\n")
             }
-
-            let newPosition = (transform * vertexTransform).columns.3
-            result.append(newPosition.x)
-            result.append(newPosition.y)
-            result.append(newPosition.z)
         }
 
-        return result
+        try faces.data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            func index(_ offset: Int) throws -> Int {
+                let value = width == 2
+                    ? Int(UInt16(littleEndian: bytes.loadUnaligned(fromByteOffset: offset, as: UInt16.self)))
+                    : Int(UInt32(littleEndian: bytes.loadUnaligned(fromByteOffset: offset, as: UInt32.self)))
+                guard value < vertices.count else { throw ObjSerializationError.InvalidMesh }
+                return vertexBase + value + 1
+            }
+            for i in 0..<faces.count {
+                if i.isMultiple(of: 1024) { try Task.checkCancellation() }
+                let start = i * width * 3
+                let a = try index(start)
+                let b = try index(start + width)
+                let c = try index(start + width * 2)
+                try emit("f \(a) \(b) \(c)\n")
+            }
+        }
     }
 }

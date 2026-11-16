@@ -87,7 +87,7 @@ final class ScanCacheFile : NSObject, NSSecureCoding, StoredCacheFileProtocol {
             self.searchableText = getSearchableText()
 
         } else {
-            fatalError("Unexpected encoding version \(version)")
+            return nil
         }
     }
 

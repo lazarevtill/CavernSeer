@@ -45,6 +45,14 @@ class ScannerControlModel : ObservableObject {
     @Published
     public private(set) var message = ""
 
+    @Published
+    private(set) var checkpointStatus = ""
+
+    func updateCheckpointStatus(_ status: String) {
+        guard checkpointStatus != status else { return }
+        checkpointStatus = status
+    }
+
     /** If we even have access to the camera. `nil` if not yet checked. */
     public private(set) var cameraEnabled: Bool?
 
@@ -52,11 +60,14 @@ class ScannerControlModel : ObservableObject {
      * Stop the passive camera, construct a `ScannerModel` and start the active AR camera.
      */
     func startScan() {
-        precondition(cameraEnabled == true)
-        precondition(model == nil)
-        precondition(renderingARView == false)
+        guard cameraEnabled == true else {
+            message = "Enable camera access in Settings to start a scan."
+            return
+        }
+        guard model == nil, !renderingARView else { return }
 
         self.message = ""
+        self.checkpointStatus = "Waiting for first recovery copy…"
 
         self.renderingPassiveView = false
 

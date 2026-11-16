@@ -17,7 +17,12 @@ struct ScanShareSheet: UIViewControllerRepresentable {
     let activityItems: [URL]
     let applicationActivities: [UIActivity]? = nil
     let excludedActivityTypes: [UIActivity.ActivityType]? = nil
-    let callback: Callback? = nil
+    let callback: Callback?
+
+    init(activityItems: [URL], callback: Callback? = nil) {
+        self.activityItems = activityItems
+        self.callback = callback
+    }
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
         let controller = UIActivityViewController(

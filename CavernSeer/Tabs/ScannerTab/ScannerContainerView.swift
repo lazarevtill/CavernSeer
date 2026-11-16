@@ -21,7 +21,7 @@ struct ScannerContainerView : View {
             if control.renderingPassiveView {
                 PassiveCameraViewContainer(control: control)
             } else if control.renderingARView {
-                ActiveARViewContainer(control: control)
+                ActiveARViewContainer(control: control, scanStore: scanStore)
             }
         }
     }

@@ -64,4 +64,18 @@ class CavernSeerTests: XCTestCase {
         bounds.includeVertices(data, count: 1, offset: -1, stride: 12, transform: matrix_identity_float4x4)
         XCTAssertNil(bounds.box)
     }
+    func testCheckpointRequiresChangesAndPreservesEarlierCoverage() {
+        var policy = ScannerModel.CheckpointPolicy()
+        let first = UUID()
+        let second = UUID()
+        let t = Date(timeIntervalSince1970: 100)
+        XCTAssertFalse(policy.shouldWrite(revision: 0, anchors: [], now: t, urgent: true))
+        XCTAssertTrue(policy.shouldWrite(revision: 1, anchors: [first], now: t, urgent: false))
+        policy.didWrite(revision: 1, anchors: [first], date: t)
+        XCTAssertFalse(policy.shouldWrite(revision: 1, anchors: [first], now: t, urgent: true))
+        XCTAssertFalse(policy.shouldWrite(revision: 2, anchors: [first, second], now: t, urgent: false))
+        XCTAssertTrue(policy.shouldWrite(revision: 2, anchors: [first, second], now: t, urgent: true))
+        XCTAssertTrue(policy.shouldWrite(revision: 2, anchors: [first, second], now: t.addingTimeInterval(26), urgent: false))
+        XCTAssertFalse(policy.shouldWrite(revision: 3, anchors: [second], now: t, urgent: true))
+    }
 }

@@ -114,6 +114,80 @@ class ScanFileTests : XCTestCase {
     }
 
 
+    func testAuthoritativeSaveSurvivesAnUnwritableCacheAndNameCollision() throws {
+        try withTemporaryStore { store, scan in
+            // Use a regular file as the parent for caches to force those writes to fail.
+            try Data("blocked".utf8).write(to: store.cacheDirectory)
+            let first = try store.saveFile(file: scan)
+            let before = try Data(contentsOf: first)
+            let second = try store.saveFile(file: scan)
+
+            XCTAssertNotEqual(first, second)
+            XCTAssertEqual(try Data(contentsOf: first), before)
+            XCTAssertEqual(
+                try SavedScanModel(url: first).scan.meshAnchors.count, scan.meshAnchors.count
+            )
+            XCTAssertEqual(try store.getCacheFile(realFileURL: second).realFileURL, second)
+            XCTAssertThrowsError(try store.saveFile(file: scan, baseName: scan.name)) { error in
+                guard case FileSaveError.AlreadyExists = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+    }
+
+    func testCorruptPreviewIsRebuiltFromAuthoritativeArchive() throws {
+        try withTemporaryStore { store, scan in
+            let saved = try store.saveFile(file: scan)
+            let id = saved.deletingPathExtension().lastPathComponent
+            let cacheURL = store.cacheDirectory
+                .appendingPathComponent(id).appendingPathExtension(ScanCacheFile.fileExtension)
+            let cached = try NSKeyedUnarchiver.unarchivedObject(
+                ofClass: ScanCacheFile.self, from: Data(contentsOf: cacheURL)
+            )
+            XCTAssertEqual(cached?.id, id)
+            try Data("corrupt cache".utf8).write(to: cacheURL)
+            let rebuilt = try store.getCacheFile(realFileURL: saved)
+            XCTAssertEqual(rebuilt.id, id)
+            XCTAssertEqual(rebuilt.realFileURL, saved)
+            XCTAssertEqual(rebuilt.displayName, scan.name)
+        }
+    }
+
+    func testOnlyRecoveryNamesCanBeAtomicallyReplaced() throws {
+        try withTemporaryStore { store, scan in
+            XCTAssertThrowsError(try store.saveRecoveryCheckpoint(file: scan, baseName: scan.name))
+            let id = "recovery_\(UUID().uuidString)"
+            let first = try store.saveRecoveryCheckpoint(file: scan, baseName: id)
+            let revised = ScanFile(
+                name: "Newer recovery", timestamp: scan.timestamp, center: scan.center,
+                extent: scan.extent, meshAnchors: scan.meshAnchors,
+                startSnapshot: scan.startSnapshot, endSnapshot: scan.endSnapshot,
+                stations: scan.stations, lines: scan.lines, location: scan.location
+            )
+            let second = try store.saveRecoveryCheckpoint(file: revised, baseName: id)
+            XCTAssertEqual(first, second)
+            XCTAssertEqual(try SavedScanModel(url: first).scan.name, revised.name)
+            XCTAssertEqual(try store.getStoreDirectoryURLs(), [second])
+        }
+    }
+
+    private func withTemporaryStore(_ test: (ScanStore, ScanFile) throws -> Void) throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let store = ScanStore(settings: SettingsStore())
+        store.dataDirectory = root.appendingPathComponent("data", isDirectory: true)
+        store.cacheDirectory = root.appendingPathComponent("preview", isDirectory: true)
+        try fileManager.createDirectory(at: store.dataDirectory, withIntermediateDirectories: true)
+        let fixture = try XCTUnwrap(Bundle(for: type(of: self)).url(
+            forResource: GreenV2.filename, withExtension: ScanFile.fileExtension
+        ))
+        try test(store, SavedScanModel(url: fixture).scan)
+    }
+
     private func assertScan<T : StaticScanFileTestData>(
         scan: ScanFile, expected: T.Type, v: Int32? = nil
     ) throws {

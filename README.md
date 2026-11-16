@@ -11,15 +11,31 @@ This version saves captured LiDAR geometry directly into the existing
 `.cavernseerscan` format, without requiring ARKit to build a relocalizable
 world map. The viewer uses bounds from the captured mesh. When there is no
 usable mesh or writing fails, the capture stays open so you can try again.
-Keep both the native scan and its OBJ export.
+- **Recovery:** while a usable mesh is present, the scanner writes a local
+  checkpoint soon after capture begins and at roughly 25–30 second intervals
+  when the mesh changes. It also attempts a checkpoint on backgrounding,
+  interruption, and stopping. The scanner shows when a write has completed.
+  Open the **Scan List** to find a separate **Recovery** entry. It is a partial
+  scan, not a tracking session you can resume. A final save does not delete it.
+- **Keep two copies:** on the scan detail page choose **Export scan → Backup
+  ZIP (original + mesh)**. Keep the original native archive for reopening in
+  CavernSeer and the OBJ for Blender or other mesh tools. Copy the ZIP to
+  another device before deleting any app data. See
+  [backup and verification workflow](docs/portable-scan-backups.md).
+- A checkpoint is not protection against loss of the phone, uninstalling the
+  app, running out of disk space, or termination before the next completed
+  write. After a hard interruption, expect at most the last successful local
+  checkpoint, not the last frame. An interrupted coordinate frame is not
+  resumed into the same scan.
 
-To test: open `CavernSeer.xcodeproj` in Xcode, select your own signing team
-and a unique bundle identifier if needed, and run on a physical LiDAR iPhone.
-In Airplane Mode with Wi-Fi off, capture a short well-lit room or stair
-landing, save it, reopen it and share an OBJ to Files. Also try saving
-before a mesh appears: the scanner should stay open. Check one measured
-distance with a tape measure. The simulator cannot validate LiDAR capture.
-Do not use a phone scan as your only means of navigation.
+**Physical iPhone check:** sign and run `CavernSeer.xcodeproj` via Xcode on a
+LiDAR iPhone. Use Airplane Mode with Wi-Fi off and scan a well-lit room.
+Wait for **Recovery copy saved**, close the app from the app switcher, reopen
+and confirm that the Recovery entry renders. Take a second scan, save it
+normally, then export the ZIP to Files and copy it to a Mac. Verify it with
+`unzip -t`; reopen the native scan and open the OBJ in Blender, then compare
+one dimension with a tape measure. The simulator cannot validate LiDAR
+capture. Do not use a phone scan as your only means of navigation.
 
 ### App Usage ###
 

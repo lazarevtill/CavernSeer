@@ -52,7 +52,8 @@ final class ScanFile : NSObject, NSSecureCoding, StoredFileProtocol {
         endSnap: SnapshotAnchor?,
         date: Date,
         stations: [SurveyStationEntity],
-        lines: [SurveyLineEntity]
+        lines: [SurveyLineEntity],
+        name: String? = nil
     ) -> ScanFile? {
         let meshes = meshAnchors.map { CSMeshSlice(anchor: $0) }
         var bounds = CaptureBounds()
@@ -66,7 +67,7 @@ final class ScanFile : NSObject, NSSecureCoding, StoredFileProtocol {
         guard let box = bounds.box else { return nil }
 
         return ScanFile(
-            name: Self.makeDefaultBaseName(with: date, as: Self.dateFormatter),
+            name: name ?? Self.makeDefaultBaseName(with: date, as: Self.dateFormatter),
             timestamp: date,
             center: box.center,
             extent: box.extent,
