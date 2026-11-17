@@ -48,6 +48,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             )
             self.window = window
             window.makeKeyAndVisible()
+            fileOpener.openURLs(urls: connectionOptions.urlContexts.map(\.url))
         }
     }
 
@@ -86,8 +87,6 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         _ scene: UIScene,
         openURLContexts URLContexts: Set<UIOpenURLContext>
     ) {
-        print("contexts: \(URLContexts.description)")
-
         let urls = URLContexts.map { $0.url }
         self.fileOpener?.openURLs(urls: urls)
     }

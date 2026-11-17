@@ -22,7 +22,14 @@ struct SavedScanRow: View {
                         .frame(width: 50, height: 50)
                 }
 
-            Text(cache.id)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(cache.displayName.isEmpty ? cache.id : cache.displayName)
+                if cache.error == nil {
+                    Text(cache.timestamp.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
 
             Spacer()
         }

@@ -9,50 +9,121 @@
 import SwiftUI /// UIViewRepresentable
 import SceneKit /// SCN*
 
-protocol BaseProjectedMiniWorldRenderController :
-    UIViewController, UIViewRepresentable, SCNSceneRendererDelegate {
+// SwiftUI requires a value type for UIViewRepresentable. SceneKit's delegate is
+// weak, so retain its reference-type owner in the representable coordinator.
+protocol BaseProjectedMiniWorldRenderController: UIViewRepresentable
+    where UIViewType == SCNView, Coordinator == ProjectedRenderCoordinator {
 
     var showUI: Bool { get }
-
     var selectedStation: SurveyStation? { get }
-    var prevSelected: SurveyStation? { get set }
     var scaleBarModel: ScaleBarModel { get }
     var renderModel: GeneralRenderModel { get }
+    var overlays: [SCNDrawSubview]? { get }
+    var observer: SCNRenderObserver? { get }
 
     func postSceneAttachment(sceneView: SCNView)
-
     func viewUpdater(uiView: SCNView)
-
     func makeaCamera() -> SCNNode
 }
 
+final class ProjectedRenderCoordinator: NSObject, SCNSceneRendererDelegate {
+    let scaleBar: ScaleBarModel?
+    let overlays: [SCNDrawSubview]
+    weak var observer: SCNRenderObserver?
+    var previousSelection: SurveyStation?
+    private let frameLock = NSLock()
+    private var framePending = false
+
+    init(scaleBar: ScaleBarModel?, overlays: [SCNDrawSubview], observer: SCNRenderObserver?) {
+        self.scaleBar = scaleBar
+        self.overlays = overlays
+        self.observer = observer
+    }
+
+    func renderer(_ renderer: SCNSceneRenderer, willRenderScene scene: SCNScene, atTime time: TimeInterval) {
+        // SceneKit calls this on its rendering thread. Avoid touching any UIKit
+        // or SpriteKit state there; queue at most one outstanding refresh.
+        frameLock.lock()
+        if framePending {
+            frameLock.unlock()
+            return
+        }
+        framePending = true
+        frameLock.unlock()
+        DispatchQueue.main.async { [weak self, weak rendererView = renderer as? SCNView] in
+            guard let self = self else { return }
+            defer { self.clearPendingFrame() }
+            guard let view = rendererView, view.delegate === self else { return }
+            self.updateOverlays(renderer: view)
+        }
+    }
+
+    private func clearPendingFrame() {
+        frameLock.lock()
+        framePending = false
+        frameLock.unlock()
+    }
+
+    @MainActor private func updateOverlays(renderer: SCNSceneRenderer) {
+        if let scaleBar = scaleBar, let camera = renderer.pointOfView?.camera,
+           scaleBar.scene.size.width > 0 {
+            let orthoScale = camera.orthographicScale
+            if orthoScale.isFinite && orthoScale > 0 && orthoScale != scaleBar.prevOrthoScale {
+                scaleBar.prevOrthoScale = orthoScale
+                scaleBar.update(renderer: renderer)
+            }
+        }
+        overlays.forEach { $0.parentRender(renderer: renderer) }
+        observer?.renderObserver(renderer: renderer)
+    }
+}
+
+private final class ProjectedSceneView: SCNView {
+    var didLayout: ((CGRect) -> Void)?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        didLayout?(bounds)
+    }
+}
 
 extension BaseProjectedMiniWorldRenderController {
+    var overlays: [SCNDrawSubview]? { nil }
+    var observer: SCNRenderObserver? { nil }
 
-    static var defaultColor: UIColor { .gray }
-    static var selectedColor: UIColor { .blue }
+    func makeCoordinator() -> ProjectedRenderCoordinator {
+        ProjectedRenderCoordinator(scaleBar: showUI ? scaleBarModel : nil, overlays: overlays ?? [], observer: observer)
+    }
 
-    static func dismantleUIView(_ uiView: SCNView, coordinator: Coordinator) {
+    static func dismantleUIView(_ uiView: SCNView, coordinator: ProjectedRenderCoordinator) {
+        uiView.isPlaying = false
+        uiView.delegate = nil
         uiView.overlaySKScene = nil
+        (uiView as? ProjectedSceneView)?.didLayout = nil
+        coordinator.overlays.forEach { $0.parentDismantled(view: uiView) }
     }
 
     func makeUIView(context: Context) -> SCNView {
-        let sceneView = SCNView(frame: .zero)
-        sceneView.backgroundColor = UIColor.systemBackground
+        let sceneView = ProjectedSceneView(frame: .zero)
+        sceneView.backgroundColor = .systemBackground
 
         let (scene, cameraNode) = makeaScene()
         sceneView.scene = scene
         sceneView.pointOfView = cameraNode
 
-        if self.showUI {
-            sceneView.overlaySKScene = self.scaleBarModel.scene
-
-            sceneView.showsStatistics = true
+        if showUI {
+            sceneView.overlaySKScene = scaleBarModel.scene
+            sceneView.didLayout = { [weak scaleBarModel] bounds in
+                guard bounds.width > 0, bounds.height > 0,
+                      let scaleBar = scaleBarModel, scaleBar.scene.size != bounds.size
+                else { return }
+                scaleBar.updateOverlay(bounds: bounds)
+                scaleBar.prevOrthoScale = 0
+            }
         }
 
-        sceneView.delegate = self
-
-        self.postSceneAttachment(sceneView: sceneView)
+        sceneView.delegate = context.coordinator
+        postSceneAttachment(sceneView: sceneView)
         sceneView.autoenablesDefaultLighting = true
         sceneView.isPlaying = true
         sceneView.loops = true
@@ -62,83 +133,20 @@ extension BaseProjectedMiniWorldRenderController {
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         viewUpdater(uiView: uiView)
-
-        if selectedStation != prevSelected {
-            updateSelection(uiView: uiView)
-        }
-
-        uiView.delegate = self
-
-        if self.showUI {
-            scaleBarModel.updateOverlay(bounds: uiView.frame)
-        }
-
         renderModel.viewUpdateHandler(scnView: uiView)
-    }
 
-    /**
-     * Must be called by the implementer during rendering.
-     */
-    func willRenderScene(
-        _ renderer: SCNSceneRenderer,
-        scene: SCNScene,
-        atTime time: TimeInterval
-    ) {
-        if self.showUI && self.scaleBarModel.scene.size.width == 0 {
-            /// this really doesn't seem like the right solution...
-            if let scnFrame = (renderer as? SCNView)?.frame {
-                DispatchQueue.main.async {
-                    [weak self] in /// this self might've already closed out?
-                    self?.scaleBarModel.updateOverlay(bounds: scnFrame)
-                }
-            }
+        // RenderModel may have just replaced station nodes, so recolor after
+        // updating geometry rather than before it.
+        let previous = context.coordinator.previousSelection
+        if let previous = previous, previous != selectedStation {
+            uiView.scene?.rootNode.childNode(withName: previous.identifier.uuidString, recursively: false)?
+                .geometry?.firstMaterial?.diffuse.contents = UIColor.gray
         }
-
-        self.updateOrthoScale(renderer)
-    }
-
-
-    fileprivate func updateOrthoScale(_ renderer: SCNSceneRenderer) {
-        guard self.showUI else { return }
-
-        if let camera = renderer.pointOfView?.camera {
-            let orthoScale = camera.orthographicScale
-            let scaleBar = self.scaleBarModel
-
-            if (
-                orthoScale != scaleBar.prevOrthoScale &&
-                scaleBar.scene.size.width > 0
-            ) {
-                scaleBar.prevOrthoScale = orthoScale
-                scaleBar.update(renderer: renderer)
-            }
+        if let selected = selectedStation {
+            uiView.scene?.rootNode.childNode(withName: selected.identifier.uuidString, recursively: false)?
+                .geometry?.firstMaterial?.diffuse.contents = UIColor.blue
         }
-    }
-
-    func updateSelection(uiView: SCNView) {
-        guard let scene = uiView.scene else { return }
-
-        if prevSelected != nil {
-            let previousNode = scene.rootNode.childNode(
-                withName: prevSelected!.identifier.uuidString,
-                recursively: false
-            )
-            previousNode?.geometry?.firstMaterial?.diffuse.contents =
-                Self.defaultColor
-        }
-
-        if selectedStation != nil {
-            let node = scene.rootNode.childNode(
-                withName: selectedStation!.identifier.uuidString,
-                recursively: false
-            )
-            node?.geometry?.firstMaterial?.diffuse.contents =
-                Self.selectedColor
-        }
-
-        DispatchQueue.main.async {
-            self.prevSelected = self.selectedStation
-        }
+        context.coordinator.previousSelection = selectedStation
     }
 
     func makeaScene() -> (SCNScene, SCNNode) {

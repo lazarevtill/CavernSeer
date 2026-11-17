@@ -32,8 +32,13 @@ struct ScannerTabView: View {
     @Environment(\.fakeScan)
     private var fakeScan: Bool
 
-    @ObservedObject
-    private var control = ScannerControlModel()
+    @EnvironmentObject
+    private var control: ScannerControlModel
+
+    @Environment(\.scenePhase)
+    private var scenePhase
+
+    @State private var confirmStop = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -47,6 +52,21 @@ struct ScannerTabView: View {
                     Color(UIColor.systemGray6).opacity(0.4).ignoresSafeArea()
                 )
         }
+        .onAppear { checkCameraPermission() }
+        .onChange(of: isSelected) { _ in checkCameraPermission() }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { checkCameraPermission() }
+        }
+        .confirmationDialog("Stop this scan?", isPresented: $confirmStop, titleVisibility: .visible) {
+            Button("Stop and attempt recovery", role: .destructive) { control.cancelScan() }
+            Button("Keep scanning", role: .cancel) {}
+        } message: {
+            Text("For a complete saved scan, choose Save instead. Recovery is best-effort.")
+        }
+    }
+
+    private func checkCameraPermission() {
+        if isSelected && !fakeScan { control.refreshCameraAccess(requestIfNeeded: true) }
     }
 
     private var scanEnabled: Bool {
@@ -61,11 +81,29 @@ struct ScannerTabView: View {
                 }
             }
 
-            if scanEnabled, !self.control.checkpointStatus.isEmpty {
+            if !control.trackingStatus.isEmpty {
+                Text(control.trackingStatus)
+                    .font(.footnote.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+            }
+
+            if !self.control.checkpointStatus.isEmpty {
                 Text(self.control.checkpointStatus)
                     .font(.footnote)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 12)
+            }
+
+            if control.cameraEnabled == false && !fakeScan {
+                Text("Camera access is required to capture a LiDAR scan.")
+                    .multilineTextAlignment(.center)
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+                .padding(.bottom, 8)
             }
 
             // controls
@@ -75,9 +113,9 @@ struct ScannerTabView: View {
                 Spacer()
 
                 if scanEnabled {
-                    saveOrCancel.disabled(self.control.isSaving)
+                    saveOrCancel.disabled(!fakeScan && (control.isSaving || !control.renderingARView))
                 } else {
-                    captureButton
+                    captureButton.disabled(control.cameraEnabled != true)
                 }
 
                 Spacer()
@@ -110,14 +148,14 @@ struct ScannerTabView: View {
                     )
             }
         )
-
+        .accessibilityLabel("Start LiDAR scan")
     }
 
     private var saveOrCancel: some View {
         VStack(alignment: .center) {
             /// cancel button
             Button(
-                action: { self.control.cancelScan() },
+                action: { self.confirmStop = true },
                 label: {
                     Text("Stop and attempt recovery")
                         .foregroundColor(.red)
@@ -152,6 +190,8 @@ struct ScannerTabView: View {
             }
         )
         .accentColor(enabled ? .yellow : .primary)
+        .accessibilityLabel(enabled ? "Turn flashlight off" : "Turn flashlight on")
+        .disabled(!ScannerModel.supportsTorch || !control.renderingARView)
     }
 
     private var debugButtons: some View {
@@ -193,6 +233,7 @@ struct ScannerTabView_Previews: PreviewProvider {
                 .environment(\.colorScheme, .light)
 
         }.environmentObject(store)
+            .environmentObject(ScannerControlModel())
     }
 
     private static var view: some View {

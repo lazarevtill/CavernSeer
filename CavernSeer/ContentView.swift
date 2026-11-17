@@ -16,6 +16,9 @@ fileprivate let supportedTabs: [TabProtocol] = [
 ].filter({ $0.isSupported })
 
 struct ContentView: View {
+    @StateObject private var scannerControl = ScannerControlModel()
+    @State private var importOpenError: String?
+    @State private var showImportOpenError = false
     @State private var selection: Tabs = Tabs.ScanListTab
     @EnvironmentObject var scanStore: ScanStore
     @EnvironmentObject var fileOpener: FileOpener
@@ -23,11 +26,12 @@ struct ContentView: View {
     let tabs: [TabProtocol] = supportedTabs
  
     var body: some View {
-        TabView(selection: $selection){
+        TabView(selection: guardedSelection){
 
             ForEach(tabs, id: \.tab) {
                 tab in
                 tab.getTabPanelView(selected: selection == tab.tab)
+                    .tag(tab.tab)
                     .tabItem {
                         VStack {
                             tab.tabImage
@@ -36,67 +40,86 @@ struct ContentView: View {
                     }
             }
         }
-        // TODO
-        .sheet(isPresented: $fileOpener.showOpenResults) {
-            if (fileOpener.openSuccesses?.count ?? 0 > 0 &&
-                    fileOpener.openFailures?.count ?? 0 == 0
-            ) {
-                /// success-state view
-                VStack {
-                    Text("Successful import!")
-                    List(Array(fileOpener.openSuccesses!.keys), id: \.self) {
-                        url
-                        in
-                        Button(action: { openFile(url: url) }) {
-                            Text(url.lastPathComponent)
+        .environmentObject(scannerControl)
+        .sheet(isPresented: importSheetPresentation) {
+            NavigationView {
+                List {
+                    if !fileOpener.openSuccesses.isEmpty {
+                        Section("Imported") {
+                            ForEach(sortedURLs(fileOpener.openSuccesses.keys), id: \.self) { url in
+                                if fileOpener.openSuccesses[url] == .scan {
+                                    Button(url.lastPathComponent) { openScan(url) }
+                                } else {
+                                    Text(url.lastPathComponent)
+                                }
+                            }
+                        }
+                    }
+                    if !fileOpener.openFailures.isEmpty {
+                        Section("Not imported") {
+                            ForEach(sortedURLs(fileOpener.openFailures.keys), id: \.self) { url in
+                                VStack(alignment: .leading) {
+                                    Text(url.lastPathComponent)
+                                    Text(fileOpener.openFailures[url] ?? "Could not open file.")
+                                        .font(.footnote)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
                         }
                     }
                 }
-            } else if fileOpener.openFailures != nil {
-                /// failure-state view
-                VStack {
-                    List(
-                        Array((fileOpener.openSuccesses ?? [:]).keys),
-                        id: \.self
-                    ) {
-                        url
-                        in
-                        Text("\(url.lastPathComponent): successful open")
+                .navigationTitle("Import results")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { fileOpener.showOpenResults = false }
                     }
-                    List(Array(fileOpener.openFailures!.keys), id: \.self) {
-                        url
-                        in
-                        Text("\(url.lastPathComponent): " +
-                             (fileOpener.openFailures![url] ?? ""))
-                    }
-                }
-            } else {
-                VStack {
-                    Text("Unknown issue opening files")
                 }
             }
         }
-    }
-
-
-    private func openFile(url: URL) {
-        self.fileOpener.showOpenResults = false
-        let type = self.fileOpener.openSuccesses![url]!
-
-        switch (type) {
-            case .project:
-                self.selection = .ProjectListTab
-            case .scan:
-                self.selection = .ScanListTab
-
-                self.scanStore.setVisible(visible: url, updateFirst: true) {
-                    fatalError(
-                        "Failed to update after openFile: " +
-                        $0.localizedDescription
-                    )
-                }
+        .alert("Could not show imported scan", isPresented: $showImportOpenError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(importOpenError ?? "Open Scan List and pull to refresh.")
         }
     }
+
+    private func sortedURLs<S: Sequence>(_ urls: S) -> [URL] where S.Element == URL {
+        urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    private var guardedSelection: Binding<Tabs> {
+        Binding(
+            get: { selection },
+            set: { proposed in
+                if scannerControl.scanEnabled && proposed != selection {
+                    scannerControl.requestFinishBeforeLeaving()
+                } else {
+                    selection = proposed
+                }
+            }
+        )
+    }
+
+    private var importSheetPresentation: Binding<Bool> {
+        Binding(
+            get: { !scannerControl.scanEnabled && fileOpener.showOpenResults },
+            set: { presented in
+                if !scannerControl.scanEnabled { fileOpener.showOpenResults = presented }
+            }
+        )
+    }
+
+    private func openScan(_ url: URL) {
+        guard !scannerControl.scanEnabled else { return }
+        fileOpener.showOpenResults = false
+        selection = .ScanListTab
+        scanStore.setVisible(visible: url, updateFirst: true) { error in
+            importOpenError = error.localizedDescription
+            showImportOpenError = true
+        }
+    }
+
 }
 
 struct ContentView_Previews: PreviewProvider {

@@ -79,3 +79,65 @@ class CavernSeerTests: XCTestCase {
         XCTAssertFalse(policy.shouldWrite(revision: 3, anchors: [second], now: t, urgent: true))
     }
 }
+
+extension CavernSeerTests {
+    func testTrashKeepsBytesAndRestoresWithoutReplacingExistingFile() throws {
+        let files = FileManager.default
+        let scratch = files.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let scans = scratch.appendingPathComponent("scans", isDirectory: true)
+        let previews = scratch.appendingPathComponent("previews", isDirectory: true)
+        try files.createDirectory(at: scans, withIntermediateDirectories: true)
+        defer { try? files.removeItem(at: scratch) }
+
+        func makeStore() -> ScanStore {
+            let store = ScanStore(settings: SettingsStore())
+            store.dataDirectory = scans
+            store.cacheDirectory = previews
+            return store
+        }
+        let store = makeStore()
+        let alpha = store.baseNameToURL(base: "alpha")
+        let beta = store.baseNameToURL(base: "beta")
+        let alphaBytes = Data("different unused scan".utf8)
+        let betaBytes = Data("selected scan's original bytes".utf8)
+        try alphaBytes.write(to: alpha)
+        try betaBytes.write(to: beta)
+        store.caches = [
+            ScanCacheFile(realFileURL: alpha, timestamp: Date(), displayName: "Not a match", img: nil),
+            ScanCacheFile(realFileURL: beta, timestamp: Date(), displayName: "Filtered target", img: nil)
+        ]
+        store.selection = ["beta"]
+        store.visibleScan = "beta"
+
+        XCTAssertEqual(store.trashScans(ids: ["beta"]), [])
+        XCTAssertEqual(try Data(contentsOf: alpha), alphaBytes)
+        XCTAssertFalse(files.fileExists(atPath: beta.path))
+        XCTAssertEqual(store.caches.map(\.id), ["alpha"])
+        XCTAssertTrue(store.selection.isEmpty)
+        XCTAssertNil(store.visibleScan)
+        XCTAssertThrowsError(try store.trashScan(id: "../alpha"))
+
+        let nextLaunch = makeStore()
+        let trashed = try XCTUnwrap(nextLaunch.trashedScans().first)
+        XCTAssertEqual(trashed.name, "beta")
+        XCTAssertEqual(try Data(contentsOf: trashed.archiveURL), betaBytes)
+        let laterBytes = Data("new scan uses the same ID".utf8)
+        try laterBytes.write(to: beta)
+        let restored = try nextLaunch.restoreScan(trashed)
+        XCTAssertNotEqual(restored, beta)
+        XCTAssertEqual(try Data(contentsOf: beta), laterBytes)
+        XCTAssertEqual(try Data(contentsOf: restored), betaBytes)
+        XCTAssertTrue(try nextLaunch.trashedScans().isEmpty)
+    }
+
+    func testNameSortingUsesBothDisplayNamesAndSettingsUseRawKeys() {
+        let a = ScanCacheFile(realFileURL: URL(fileURLWithPath: "/z-file.cavernseerscan"), timestamp: Date(),
+                              displayName: "Alpha", img: nil)
+        let b = ScanCacheFile(realFileURL: URL(fileURLWithPath: "/a-file.cavernseerscan"), timestamp: Date(),
+                              displayName: "Beta", img: nil)
+        let comparator = CacheSortComparator<ScanCacheFile>(.name)
+        XCTAssertEqual(comparator.compare(a, b), .orderedAscending)
+        XCTAssertEqual(comparator.compare(b, a), .orderedDescending)
+        XCTAssertEqual(Set(getSettingsDefaultDictionary().keys), Set(SettingsKey.allCases.map(\.rawValue)))
+    }
+}

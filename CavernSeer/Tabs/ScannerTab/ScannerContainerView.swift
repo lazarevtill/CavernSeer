@@ -17,7 +17,7 @@ struct ScannerContainerView : View {
     var control: ScannerControlModel
 
     var body: some View {
-        if control.cameraEnabled != false {
+        if control.cameraEnabled == true {
             if control.renderingPassiveView {
                 PassiveCameraViewContainer(control: control)
             } else if control.renderingARView {

@@ -26,18 +26,15 @@ struct PlanProjectedMiniWorldRender: View {
     var initialHeight: Int? = nil
 
     @State
-    private var prevSelection: SurveyStation?
-
-    @State
     private var scaleBarModel = ScaleBarModel()
 
     @State
     private var height: Int = 0
 
-    @ObservedObject
+    @StateObject
     private var snapshotModel = SnapshotExportModel()
 
-    @ObservedObject
+    @StateObject
     private var renderModel = GeneralRenderModel()
 
     var body: some View {
@@ -47,7 +44,6 @@ struct PlanProjectedMiniWorldRender: View {
                 renderModel: renderModel,
                 snapshotModel: snapshotModel,
                 selection: selection,
-                prevSelection: $prevSelection,
                 overlays: overlays,
                 scaleBarModel: scaleBarModel,
                 showUI: self.showUI
@@ -62,7 +58,6 @@ struct PlanProjectedMiniWorldRender: View {
         .snapshotMenus(for: _snapshotModel)
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
-                [unowned snapshotModel, unowned renderModel, unowned imageSharer] in
                 snapshotModel.promptButton(scan: scan, sharer: imageSharer)
                 renderModel.doubleSidedButton()
             }
@@ -98,8 +93,7 @@ class SCNDrawSubview : UIView {
 }
 
 
-final class PlanProjectedMiniWorldRenderController :
-    UIViewController, BaseProjectedMiniWorldRenderController {
+private struct PlanProjectedMiniWorldRenderController: BaseProjectedMiniWorldRenderController {
 
     let showUI: Bool
 
@@ -108,18 +102,15 @@ final class PlanProjectedMiniWorldRenderController :
     @Binding
     var height: Int
     var selectedStation: SurveyStation?
-    @Binding
-    var prevSelected: SurveyStation?
-    unowned var scaleBarModel: ScaleBarModel
-    unowned var snapshotModel: SnapshotExportModel
-    unowned var renderModel: GeneralRenderModel
+    let scaleBarModel: ScaleBarModel
+    let snapshotModel: SnapshotExportModel
+    let renderModel: GeneralRenderModel
 
     init(
         height: Binding<Int>,
         renderModel: GeneralRenderModel,
         snapshotModel: SnapshotExportModel,
         selection: SurveyStation?,
-        prevSelection: Binding<SurveyStation?>,
         overlays: [SCNDrawSubview]?,
         scaleBarModel: ScaleBarModel,
         showUI: Bool
@@ -128,18 +119,11 @@ final class PlanProjectedMiniWorldRenderController :
         self.renderModel = renderModel
         self.snapshotModel = snapshotModel
         self.selectedStation = selection
-        self._prevSelected = prevSelection
         self.overlays = overlays
         self.scaleBarModel = scaleBarModel
         self.showUI = showUI
-
-        super.init(nibName: nil, bundle: nil)
     }
 
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
 
     func postSceneAttachment(sceneView: SCNView) {
         sceneView.allowsCameraControl = true
@@ -148,17 +132,16 @@ final class PlanProjectedMiniWorldRenderController :
     }
 
     func viewUpdater(uiView: SCNView) {
-        let pov = uiView.pointOfView
-        if pov != nil {
-            let pos = pov!.position
+        if let pov = uiView.pointOfView {
+            let pos = pov.position
             let move = SCNAction.moveBy(
                 x: 0,
                 y: CGFloat(Float(height) - pos.y),
                 z: 0, duration: 0.5
             )
-            pov!.runAction(move)
+            pov.runAction(move)
 
-            pov!.camera?.fieldOfView = uiView.frame.size.width
+            pov.camera?.fieldOfView = uiView.frame.size.width
         }
 
         self.snapshotModel.viewUpdaterHandler(
@@ -183,25 +166,5 @@ final class PlanProjectedMiniWorldRenderController :
         cameraNode.eulerAngles = SCNVector3Make(.pi / -2, 0, 0)
 
         return cameraNode
-    }
-
-    func renderer(
-        _ renderer: SCNSceneRenderer,
-        willRenderScene scene: SCNScene,
-        atTime time: TimeInterval
-    ) {
-        self.willRenderScene(renderer, scene: scene, atTime: time)
-        self.overlays?.forEach { $0.parentRender(renderer: renderer) }
-    }
-
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        scaleBarModel.updateOverlay(bounds: view.frame)
-    }
-
-    static func dismantleUIView(_ uiView: SCNView, coordinator: ()) {
-        uiView.subviews
-            .compactMap { return $0 as? SCNDrawSubview }
-            .forEach { $0.parentDismantled(view: uiView) }
     }
 }

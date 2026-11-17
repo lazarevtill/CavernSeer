@@ -1,11 +1,11 @@
 <img src="/docs/icons/icon-167.png" align="right">
 
-#  CavernSeer v0.3.3-dev
+# CavernSeer
 > An iPadOS and iOS application for scanning 3D spaces
 
-Designed for cave and shelter surveying, CavernSeer leverages the LiDAR scanner of the 2020 iPad Pro and the iPhone 12 Pro, and RealityKit's scene reconstruction, to generate relatively-accurate 3D meshes of real-world spaces and render them in various convenient ways.
+CavernSeer uses ARKit and RealityKit scene reconstruction to record a local triangle mesh on LiDAR-equipped iPhones and iPads. It works with individual scan segments. It is not a safety tool, a georeferenced survey, or a substitute for validating scale and drift.
 
-## Fork: more reliable local scan saving
+## Reliable local LiDAR capture
 
 This version saves captured LiDAR geometry directly into the existing
 `.cavernseerscan` format, without requiring ARKit to build a relocalizable
@@ -16,7 +16,7 @@ usable mesh or writing fails, the capture stays open so you can try again.
   when the mesh changes. It also attempts a checkpoint on backgrounding,
   interruption, and stopping. The scanner shows when a write has completed.
   Open the **Scan List** to find a separate **Recovery** entry. It is a partial
-  scan, not a tracking session you can resume. A final save does not delete it.
+  scan, not a tracking session you can resume. A final save does not delete it. If spatial tracking loses previously recorded mesh, keep the earlier recovery and record the available geometry separately.
 - **Keep two copies:** on the scan detail page choose **Export scan → Backup
   ZIP (original + mesh)**. Keep the original native archive for reopening in
   CavernSeer and the OBJ for Blender or other mesh tools. Copy the ZIP to
@@ -48,9 +48,9 @@ Scans created by the user or imported from elsewhere will appear in the "Scan Li
 Selecting a scan displays the start and end photos (if available), *export* options for the scan file as well as a plaintext .OBJ render, as well as the following:
  * Advanced - underlying information about the scan.
  * 3D Render - a 3D perspective rendering view navigable based on the setting "3D render interaction mode".
- * Plan Projected Render - a "top-down" orthographic projection complete with scale bar. Defaults to north-up. The height control allows for raising or lowering the camera to show or hide obstructions. 
- * Elevation Projected Render - a "side-view" orthographic projection with scale bar, compass, and various controls. The angle controls change the direction the camera is facing relative to magnetic-north. The depth control is similar to the plan-projected height control, allowing for pushing the camera through obstructions.
- * Cross Section Render - an elevation projection (see above) with an inset plan-projection indicating the position and size of the camera, and a switch for making the camera "depth-of-field" 1-meter deep to create a cross-section slice.
+ * Plan Projected Render - a "top-down" orthographic projection complete with scale bar. Defaults to local scan orientation; do not interpret it as north. The height control allows for raising or lowering the camera to show or hide obstructions.
+ * Elevation Projected Render - a "side-view" orthographic projection with scale bar, compass, and various controls. The angle controls change the direction the camera is facing relative to the local scan axes. The depth control is similar to the plan-projected height control, allowing for pushing the camera through obstructions.
+ * Cross Section Render - an elevation projection (see above) with an inset plan-projection indicating the position and size of the camera, and adjustable cross-section depth.
 
 All of the renders support high-resolution screenshots scaled to higher detail than the device itself.
 
@@ -70,11 +70,13 @@ Clicking the center button again will complete and save the scan, which will app
  * Debugging options where appropriate.
 
 
-## Getting Started (Development)
+## Install and test
 
-The fork targets **iOS 15 or later** and was built with **Xcode 26.3**.
+The app targets **iOS 15 or later** and was built with **Xcode 26.3**.
 No external dependencies are required, so you should be able to clone the repo into Xcode and build to your device.
 
-Due to particulars with the serialization of Apple-owned data structures, actions relating to scan files (e.g. importing or rendering) aren't supported in the simulator.
+Select your own signing team to install on iPhone. The project uses `io.github.lazarevtill.CavernSeer` as its distinct bundle identifier. Open the exact signed build online first and check its provisioning expiry before relying on it offline. For the field rehearsal, relaunch from the Home Screen with Xcode's debugger detached and test lock, backgrounding, and force quit separately. See [device acceptance](docs/device-acceptance.md).
+
+The Simulator supports testing native scan fixtures, rendering, backup export, and scan list operations. It cannot generate or validate LiDAR captures. Run the isolated simulator workflow with `scripts/simulator-smoke.sh SIMULATOR_UDID`. This smoke test uses a separate app identifier and disposable scans, not the main app’s storage.
 
 ## _More to come!_

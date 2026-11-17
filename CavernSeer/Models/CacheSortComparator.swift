@@ -48,7 +48,7 @@ class CacheSortComparator<TCache : StoredCacheFileProtocol> : SortComparator {
             case .fileName:
                 return { $0.id.compare($1.id) }
             case .name:
-                return { $0.displayName.compare($1.id) }
+                return { $0.displayName.compare($1.displayName) }
         }
     }
 }

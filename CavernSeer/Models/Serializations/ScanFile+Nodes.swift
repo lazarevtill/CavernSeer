@@ -37,7 +37,7 @@ extension ScanFile {
 
         let stationNodes = Array(stationDict.values)
 
-        let lineNodes = self.lines.map {
+        let lineNodes = self.lines.compactMap {
             line in
             line.toSCNNode(stationDict: stationDict, lengthPref: lengthPref)
         }
@@ -103,7 +103,7 @@ fileprivate func elementCsToScn(
 ) -> SCNGeometryElement {
     return SCNGeometryElement(
         data: element.data,
-        primitiveType: .triangles,
+        primitiveType: element.primitiveType,
         primitiveCount: element.count,
         bytesPerIndex: element.bytesPerIndex
     )

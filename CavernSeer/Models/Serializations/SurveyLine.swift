@@ -21,12 +21,12 @@ final class SurveyLine: NSObject, NSSecureCoding {
         get { "\(startIdentifier.uuidString)_\(endIdentifier.uuidString)" }
     }
 
-    init(entity: SurveyLineEntity) {
+    init?(entity: SurveyLineEntity) {
         guard
             let startId = entity.start.anchor?.anchorIdentifier,
             let endId = entity.end.anchor?.anchorIdentifier
         else {
-            fatalError("SurveyLine's start/end has no anchor")
+            return nil
         }
 
         self.startIdentifier = startId
@@ -34,12 +34,11 @@ final class SurveyLine: NSObject, NSSecureCoding {
     }
 
     required init?(coder decoder: NSCoder) {
-        self.startIdentifier = decoder.decodeObject(
-            of: NSUUID.self,
-            forKey: PropertyKeys.startId)! as SurveyStation.Identifier
-        self.endIdentifier = decoder.decodeObject(
-            of: NSUUID.self,
-            forKey: PropertyKeys.endId)! as SurveyStation.Identifier
+        guard let start = decoder.decodeObject(of: NSUUID.self, forKey: PropertyKeys.startId),
+              let end = decoder.decodeObject(of: NSUUID.self, forKey: PropertyKeys.endId)
+        else { return nil }
+        self.startIdentifier = start as UUID
+        self.endIdentifier = end as UUID
     }
 
     func encode(with coder: NSCoder) {
@@ -58,7 +57,7 @@ extension SurveyLine {
             let start = stationDict[self.startIdentifier],
             let end = stationDict[self.endIdentifier]
         else {
-            fatalError("SurveyLine.toSCNNode start/end not in dict")
+            return "—"
         }
 
         return getDistanceString(
@@ -71,12 +70,12 @@ extension SurveyLine {
     func toSCNNode(
         stationDict: [SurveyStation.Identifier:SCNNode],
         lengthPref: LengthPreference
-    ) -> SCNNode {
+    ) -> SCNNode? {
         guard
             let start = stationDict[self.startIdentifier],
             let end = stationDict[self.endIdentifier]
         else {
-            fatalError("SurveyLine.toSCNNode start/end not in dict")
+            return nil
         }
 
         let startPos = start.simdPosition

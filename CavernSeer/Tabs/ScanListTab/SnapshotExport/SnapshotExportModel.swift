@@ -13,8 +13,8 @@ import SpriteKit /// SKScene
 class SnapshotExportModel : ObservableObject {
     fileprivate static let multipliers = [1, 2, 4, 8]
 
-    private unowned var scan: ScanFile?
-    private unowned var imageSharer: ShareSheetUtility?
+    private weak var scan: ScanFile?
+    private weak var imageSharer: ShareSheetUtility?
 
     @Published
     fileprivate var promptShowing = false
@@ -117,14 +117,13 @@ class SnapshotExportModel : ObservableObject {
 
 extension View {
     func snapshotMenus(
-        for observable: ObservedObject<SnapshotExportModel>
+        for observable: StateObject<SnapshotExportModel>
     ) -> some View {
         let binding = observable.projectedValue
-        unowned let model = observable.wrappedValue
+        let model = observable.wrappedValue
 
         return self
             .actionSheet(isPresented: binding.promptShowing) {
-                [unowned model] in
                 ActionSheet(
                     title: Text("Export a scaled image"),
                     message: Text("Wait a few seconds for the render"),
@@ -145,11 +144,11 @@ extension View {
                 mult in
                 ActionSheet.Button.default(
                     Text("@\(mult)x (~\(mult * width)x\(mult * height))"),
-                    action: { [unowned model] in model.chooseSize(mult) }
+                    action: { [weak model] in model?.chooseSize(mult) }
                 )
             }
 
-        btns.append(.cancel({ [unowned model] in model.chooseSize(nil) }))
+        btns.append(.cancel({ [weak model] in model?.chooseSize(nil) }))
 
         return btns
     }

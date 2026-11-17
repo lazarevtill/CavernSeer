@@ -7,6 +7,8 @@
 //
 
 import Foundation
+import Combine
+import AVFoundation
 
 class ScannerControlModel : ObservableObject {
 
@@ -48,13 +50,50 @@ class ScannerControlModel : ObservableObject {
     @Published
     private(set) var checkpointStatus = ""
 
+    @Published
+    private(set) var trackingStatus = ""
+
+    func updateTrackingStatus(_ status: String) {
+        guard trackingStatus != status else { return }
+        trackingStatus = status
+    }
+
+    func requestFinishBeforeLeaving() {
+        message = isSaving
+            ? "Wait for the scan to finish saving before leaving."
+            : "Save or stop this scan before leaving the Scanner tab."
+    }
+
     func updateCheckpointStatus(_ status: String) {
         guard checkpointStatus != status else { return }
         checkpointStatus = status
     }
 
     /** If we even have access to the camera. `nil` if not yet checked. */
+    @Published
     public private(set) var cameraEnabled: Bool?
+    private var requestingCamera = false
+
+    func refreshCameraAccess(requestIfNeeded: Bool) {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            updateCameraAccess(hasAccess: true)
+        case .denied, .restricted:
+            updateCameraAccess(hasAccess: false)
+        case .notDetermined:
+            guard requestIfNeeded, !requestingCamera else { return }
+            requestingCamera = true
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.requestingCamera = false
+                    self.updateCameraAccess(hasAccess: allowed)
+                }
+            }
+        @unknown default:
+            updateCameraAccess(hasAccess: false)
+        }
+    }
 
     /**
      * Stop the passive camera, construct a `ScannerModel` and start the active AR camera.
@@ -64,26 +103,29 @@ class ScannerControlModel : ObservableObject {
             message = "Enable camera access in Settings to start a scan."
             return
         }
-        guard model == nil, !renderingARView else { return }
+        guard model == nil, !renderingARView, !scanEnabled else { return }
 
         self.message = ""
         self.checkpointStatus = "Waiting for first recovery copy…"
+        self.trackingStatus = ""
 
         self.renderingPassiveView = false
 
         self.model = ScannerModel(control: self)
 
-        self.renderingARView = true
         self.scanEnabled = true
-
-        /// now we wait for `model.onViewAppear` which will start the scan
+        // The live preview and ARKit must not start competing for the camera.
+        PassiveCameraViewContainer.afterPreviewStops { [weak self] in
+            guard let self = self, self.scanEnabled, self.model != nil else { return }
+            self.renderingARView = true
+        }
     }
 
     /**
      * Simply stops rendering the ARView, triggering the `ActiveARViewContainer` to
      * disappear, subsequently calling `scanDisappearing`.
      *
-     * Does  not save the scan.
+     * Teardown requests a final best-effort recovery copy, not a named scan.
      */
     func cancelScan() {
         if self.renderingARView {
@@ -108,6 +150,7 @@ class ScannerControlModel : ObservableObject {
         self.model = nil
         self.isSaving = false
         self.torchEnabled = false
+        self.trackingStatus = ""
 
         self.renderingPassiveView = true
     }
@@ -146,7 +189,11 @@ class ScannerControlModel : ObservableObject {
         self.meshEnabled = enable
     }
 
-    func updateCameraAccess(hasAccess: Bool) {
+    private func updateCameraAccess(hasAccess: Bool) {
+        guard self.cameraEnabled != hasAccess else { return }
         self.cameraEnabled = hasAccess
+        if hasAccess && message == "Enable camera access in Settings to start a scan." {
+            message = ""
+        }
     }
 }

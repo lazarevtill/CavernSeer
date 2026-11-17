@@ -18,8 +18,7 @@ struct RotationControls: View {
             onIncrement: { clampRotation(+5) },
             onDecrement: { clampRotation(-5) },
             label: {
-                Text("\(rotation)ºN")
-                + Text("m").font(.system(size: 8)).baselineOffset(0)
+                Text("\(rotation)° local")
             }
         )
             .frame(width: 155)

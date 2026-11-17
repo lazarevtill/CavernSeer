@@ -172,6 +172,58 @@ class ScanFileTests : XCTestCase {
         }
     }
 
+    func testImportPreservesNativeBytesAndRejectsCollisions() throws {
+        try withTemporaryStore { store, _ in
+            let sourceFixture = try XCTUnwrap(Bundle(for: type(of: self)).url(
+                forResource: GreenV2.filename, withExtension: ScanFile.fileExtension
+            ))
+            let source = store.dataDirectory.deletingLastPathComponent()
+                .appendingPathComponent(sourceFixture.lastPathComponent)
+            try FileManager.default.copyItem(at: sourceFixture, to: source)
+            let data = try Data(contentsOf: source)
+            let imported = try store.importFile(from: source)
+            XCTAssertNotEqual(source, imported)
+            XCTAssertEqual(try Data(contentsOf: imported), data)
+            XCTAssertEqual(try Data(contentsOf: source), data)
+            XCTAssertEqual(try SavedScanModel(url: imported).scan.name, GreenV2.name)
+            XCTAssertThrowsError(try store.importFile(from: source)) { error in
+                guard case FileSaveError.AlreadyExists = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+            XCTAssertEqual(try Data(contentsOf: imported), data)
+            XCTAssertEqual(try store.getStoreDirectoryURLs(), [imported])
+        }
+    }
+
+    func testUnreadableArchiveDoesNotPublishOrRemoveSource() throws {
+        try withTemporaryStore { store, _ in
+            let source = store.dataDirectory.deletingLastPathComponent()
+                .appendingPathComponent("not-a-scan.cavernseerscan")
+            let data = Data("Not a scan archive".utf8)
+            try data.write(to: source)
+            XCTAssertThrowsError(try store.importFile(from: source))
+            XCTAssertEqual(try Data(contentsOf: source), data)
+            XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: store.dataDirectory.path).isEmpty)
+        }
+    }
+
+    func testRecoveryLookupLoadsNewRevisionAtSameURL() throws {
+        try withTemporaryStore { store, scan in
+            let id = "recovery_\(UUID().uuidString)"
+            let first = try store.saveRecoveryCheckpoint(file: scan, baseName: id)
+            XCTAssertEqual(try store.getModel(url: first).scan.name, scan.name)
+            let updated = ScanFile(
+                name: "Newer revision at same URL", timestamp: scan.timestamp,
+                center: scan.center, extent: scan.extent, meshAnchors: scan.meshAnchors,
+                startSnapshot: scan.startSnapshot, endSnapshot: scan.endSnapshot,
+                stations: scan.stations, lines: scan.lines, location: scan.location
+            )
+            XCTAssertEqual(try store.saveRecoveryCheckpoint(file: updated, baseName: id), first)
+            XCTAssertEqual(try store.getModel(url: first).scan.name, updated.name)
+        }
+    }
+
     private func withTemporaryStore(_ test: (ScanStore, ScanFile) throws -> Void) throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)

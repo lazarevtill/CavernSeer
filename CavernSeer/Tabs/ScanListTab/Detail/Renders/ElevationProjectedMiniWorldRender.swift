@@ -32,13 +32,10 @@ struct ElevationProjectedMiniWorldRender: View {
     var showUI: Bool = true
 
     @State
-    private var prevSelection: SurveyStation?
-
-    @State
     private var scaleBarModel = ScaleBarModel()
 
     /**
-     * The rotation of the perspective, in degrees from magnetic north.
+     * The rotation of the perspective, in degrees in the local capture frame.
      *
      * Doing manual rotation rather than leaving it up to a value-binding seems to provide
      * more consistently, especially since we want to clamp the rotation to `[0, 360)`.
@@ -52,9 +49,9 @@ struct ElevationProjectedMiniWorldRender: View {
     @State
     private var fly: Int = 0
 
-    @ObservedObject
+    @StateObject
     private var snapshotModel = SnapshotExportModel()
-    @ObservedObject
+    @StateObject
     private var renderModel = GeneralRenderModel()
 
     var body: some View {
@@ -67,7 +64,6 @@ struct ElevationProjectedMiniWorldRender: View {
                     renderModel: renderModel,
                     snapshotModel: snapshotModel,
                     selection: selection,
-                    prevSelection: prevSelection,
                     observer: observer,
                     scaleBarModel: scaleBarModel,
                     showUI: showUI
@@ -105,7 +101,6 @@ struct ElevationProjectedMiniWorldRender: View {
         .snapshotMenus(for: _snapshotModel)
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
-            [unowned snapshotModel, unowned renderModel, unowned imageSharer] in
                 snapshotModel.promptButton(scan: scan, sharer: imageSharer)
                 renderModel.doubleSidedButton()
             }
@@ -122,9 +117,7 @@ struct ElevationProjectedMiniWorldRender: View {
     }
 }
 
-fileprivate final class ElevationProjectedMiniWorldRenderController :
-    UIViewController,
-    BaseProjectedMiniWorldRenderController {
+private struct ElevationProjectedMiniWorldRenderController: BaseProjectedMiniWorldRenderController {
 
     private static let DefaultDepthOfField: Double = 1000
 
@@ -136,11 +129,10 @@ fileprivate final class ElevationProjectedMiniWorldRenderController :
     @Binding
     var fly: Int
     var selectedStation: SurveyStation?
-    var prevSelected: SurveyStation?
-    unowned var scaleBarModel: ScaleBarModel
-    unowned var snapshotModel: SnapshotExportModel
-    unowned var renderModel: GeneralRenderModel
-    unowned var observer: SCNRenderObserver?
+    let scaleBarModel: ScaleBarModel
+    let snapshotModel: SnapshotExportModel
+    let renderModel: GeneralRenderModel
+    var observer: SCNRenderObserver?
 
     init(
         rotation: Binding<Int>,
@@ -149,7 +141,6 @@ fileprivate final class ElevationProjectedMiniWorldRenderController :
         renderModel: GeneralRenderModel,
         snapshotModel: SnapshotExportModel,
         selection: SurveyStation?,
-        prevSelection: SurveyStation?,
         observer: SCNRenderObserver?,
         scaleBarModel: ScaleBarModel,
         showUI: Bool
@@ -160,21 +151,13 @@ fileprivate final class ElevationProjectedMiniWorldRenderController :
         self.renderModel = renderModel
         self.snapshotModel = snapshotModel
         self.selectedStation = selection
-        self.prevSelected = prevSelection
         self.observer = observer
         self.scaleBarModel = scaleBarModel
         self.showUI = showUI
-
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
     }
 
     func viewUpdater(uiView: SCNView) {
-        let pov = uiView.pointOfView
-        if pov != nil {
+        if let pov = uiView.pointOfView {
             let rotation = CGFloat(self.rotation)
             let angleRads = CGFloat.pi * rotation / 180
 
@@ -185,7 +168,7 @@ fileprivate final class ElevationProjectedMiniWorldRenderController :
                 duration: 0.5,
                 usesShortestUnitArc: true
             )
-            pov!.runAction(move)
+            pov.runAction(move)
 
             let flyDist = CGFloat(self.fly)
             if flyDist != 0 {
@@ -195,30 +178,21 @@ fileprivate final class ElevationProjectedMiniWorldRenderController :
                     -flyDist * cos(angleRads)
                 )
                 let flyMove = SCNAction.move(by: by, duration: 0.5)
-                pov!.runAction(flyMove)
+                pov.runAction(flyMove)
 
                 DispatchQueue.main.async {
                     self.fly = 0
                 }
             }
             
-            pov!.camera?.zFar = depthOfField ?? Self.DefaultDepthOfField
-            pov!.camera?.fieldOfView = uiView.frame.size.width
+            pov.camera?.zFar = depthOfField ?? Self.DefaultDepthOfField
+            pov.camera?.fieldOfView = uiView.frame.size.width
         }
 
         self.snapshotModel.viewUpdaterHandler(
             scnView: uiView,
             overlay: self.scaleBarModel.scene
         )
-    }
-
-    func renderer(
-        _ renderer: SCNSceneRenderer,
-        willRenderScene scene: SCNScene,
-        atTime time: TimeInterval
-    ) {
-        self.willRenderScene(renderer, scene: scene, atTime: time)
-        self.observer?.renderObserver(renderer: renderer)
     }
 
     func makeaCamera() -> SCNNode {
@@ -239,10 +213,5 @@ fileprivate final class ElevationProjectedMiniWorldRenderController :
     func postSceneAttachment(sceneView: SCNView) {
         sceneView.allowsCameraControl = true
         sceneView.defaultCameraController.interactionMode = .pan
-    }
-
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        scaleBarModel.updateOverlay(bounds: view.frame)
     }
 }

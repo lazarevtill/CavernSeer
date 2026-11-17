@@ -17,12 +17,12 @@ final class SurveyStation: NSObject, NSSecureCoding {
     let identifier: Identifier
     let transform: float4x4
 
-    init(entity: SurveyStationEntity, name: String? = nil) {
+    init?(entity: SurveyStationEntity, name: String? = nil) {
         guard
             let anchor = entity.anchor,
             let identifier = anchor.anchorIdentifier
         else {
-            fatalError("SurveyStationEntity has no anchor")
+            return nil
         }
 
         self.name = name ?? identifier.uuidString
@@ -38,16 +38,13 @@ final class SurveyStation: NSObject, NSSecureCoding {
     }
 
     required init?(coder decoder: NSCoder) {
-        self.identifier = decoder.decodeObject(
-            of: NSUUID.self,
-            forKey: PropertyKeys.identifier)! as Identifier
+        guard let identifier = decoder.decodeObject(of: NSUUID.self, forKey: PropertyKeys.identifier) else { return nil }
+        self.identifier = identifier as UUID
         self.transform =
             decoder.decode_simd_float4x4(prefix: PropertyKeys.transform)
         if decoder.containsValue(forKey: PropertyKeys.name) {
-            self.name = decoder.decodeObject(
-                of: NSString.self,
-                forKey: PropertyKeys.name
-            )! as String
+            guard let name = decoder.decodeObject(of: NSString.self, forKey: PropertyKeys.name) else { return nil }
+            self.name = name as String
         } else {
             self.name = self.identifier.uuidString
         }

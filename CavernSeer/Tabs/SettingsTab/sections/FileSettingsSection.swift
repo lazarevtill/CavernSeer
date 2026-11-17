@@ -13,67 +13,60 @@ struct FileSettingsSection: View {
     @EnvironmentObject
     var scanStore: ScanStore
 
-    @State
-    var showDeletePrompt = false
+    @State private var showTrashPrompt = false
+    @State private var operationError: String?
+    @State private var showOperationError = false
+    @State private var rebuilding = false
 
     var body: some View {
-        Group() {
-            HStack {
-                Button(action: clear) {
-                    Text("Clear caches")
+        Group {
+            Button {
+                rebuilding = true
+                scanStore.rebuildScanPreviews { error in
+                    rebuilding = false
+                    if let error = error { presentError(error.localizedDescription) }
+                }
+            } label: {
+                HStack {
+                    Text("Rebuild scan previews")
+                    if rebuilding { ProgressView() }
                 }
             }
-            HStack {
-                Button(action: buildCaches) {
-                    Text("Build caches")
-                }
+            .disabled(rebuilding)
+
+            Button {
+                showTrashPrompt = true
+            } label: {
+                Text("Move all scans to Trash")
+                    .foregroundColor(.red)
             }
-            HStack {
-                Button(action: { showDeletePrompt = true }) {
-                    Text("Delete all stored files")
-                        .foregroundColor(Color(UIColor.systemRed))
-                }
-                .confirmationDialog(
-                    Text("Delete all files stored in the app? This cannot be undone!"),
-                    isPresented: $showDeletePrompt,
-                    titleVisibility: .visible
-                ) {
-                    Button("Delete all", role: .destructive) {
-                        deleteAllFiles()
+            .confirmationDialog(
+                "Move all scans to Trash?",
+                isPresented: $showTrashPrompt,
+                titleVisibility: .visible
+            ) {
+                Button("Move all to Trash", role: .destructive) {
+                    do {
+                        let failures = try scanStore.trashAllScans()
+                        if !failures.isEmpty { presentError(failures.joined(separator: "\n")) }
+                    } catch {
+                        presentError(error.localizedDescription)
                     }
-                    Button("Cancel", role: .cancel) {
-                        showDeletePrompt = false
-                    }
                 }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("You can restore them from Scan List → Trash. This does not free storage.")
             }
         }
-    }
-
-    private func clear() {
-        do {
-            try self.scanStore.clearCaches()
-        } catch {
-            fatalError("Failed to clear caches: \(error.localizedDescription)")
+        .alert("Scan storage", isPresented: $showOperationError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(operationError ?? "")
         }
     }
 
-    private func buildCaches() {
-        self.scanStore.update() {
-            err in
-            if err != nil {
-                fatalError(
-                    "Failed to rebuild caches: " +
-                    err!.localizedDescription
-                )
-            }
-        }
-    }
-
-    private func deleteAllFiles() {
-        do {
-            try self.scanStore.DANGEROUSLY_deleteAllFiles()
-        } catch {
-            fatalError("Failed to delete all files: \(error.localizedDescription)")
-        }
+    private func presentError(_ text: String) {
+        operationError = text
+        showOperationError = true
     }
 }

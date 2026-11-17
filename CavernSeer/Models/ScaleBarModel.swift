@@ -57,6 +57,8 @@ final class ScaleBarModel: ObservableObject {
             simd_double3(renderer.unprojectPoint(SCNVector3Make(1, 0, 0)))
         )
 
+        guard metersPerPt.isFinite, metersPerPt > 0 else { return }
+
         if let bar = scene.childNode(withName: "scalebar") as? SKShapeNode {
             let offset = 2 * ScaleBarModel.borderSize
 

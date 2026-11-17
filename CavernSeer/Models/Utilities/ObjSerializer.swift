@@ -25,6 +25,7 @@ final class ObjSerializer: ObservableObject {
         func emit(_ line: String) throws {
             buffer.append(contentsOf: line.utf8)
             if buffer.count >= 256 * 1024 {
+                try Task.checkCancellation()
                 try handle.write(contentsOf: buffer)
                 buffer.removeAll(keepingCapacity: true)
             }
@@ -45,7 +46,7 @@ final class ObjSerializer: ObservableObject {
     }
 
     enum Output {
-        case mesh, backup
+        case mesh, native, backup
     }
 
     /// Returns a complete, temporary sharing artifact. Until the ZIP is ready,
@@ -53,7 +54,7 @@ final class ObjSerializer: ObservableObject {
     nonisolated static func prepare(_ output: Output, model: SavedScanModel) async throws -> URL {
         let manager = FileManager.default
         let identifier = UUID()
-        let root = manager.temporaryDirectory.appendingPathComponent(identifier.uuidString, isDirectory: true)
+        let root = manager.temporaryDirectory.appendingPathComponent("CavernSeer-Export-" + identifier.uuidString, isDirectory: true)
         let stamp = ISO8601DateFormatter.string(
             from: model.scan.timestamp, timeZone: TimeZone(secondsFromGMT: 0)!,
             formatOptions: [.withFullDate, .withTime, .withTimeZone, .withDashSeparatorInDate]
@@ -61,10 +62,21 @@ final class ObjSerializer: ObservableObject {
         let name = "CavernSeer-\(stamp)-\(identifier.uuidString.prefix(8))"
         try manager.createDirectory(at: root, withIntermediateDirectories: false)
         do {
+            // The on-disk archive is the source of truth, including for OBJ-only.
+            // A displayed recovery preview may represent a prior rolling revision.
             if output == .mesh {
                 let mesh = root.appendingPathComponent(name + ".obj")
-                try writeMesh(scan: model.scan, to: mesh)
+                let current = try SavedScanModel(url: model.url).scan
+                try writeMesh(scan: current, to: mesh)
                 return mesh
+            }
+
+            if output == .native {
+                let native = root.appendingPathComponent(name + ".cavernseerscan")
+                try Task.checkCancellation()
+                try manager.copyItem(at: model.url, to: native)
+                try Task.checkCancellation()
+                return native
             }
 
             let files = root.appendingPathComponent("CavernSeer-Backup", isDirectory: true)
@@ -84,7 +96,9 @@ final class ObjSerializer: ObservableObject {
                 nativeArchiveFilename: native.lastPathComponent,
                 nativeFormatVersion: portableScan.encodingVersion,
                 meshUnits: "meters",
-                meshCoordinates: "Local ARKit capture coordinates, +Y up. Not georeferenced."
+                meshCoordinates: "Local ARKit capture coordinates, +Y up. Not georeferenced.",
+                vertexCount: portableScan.meshAnchors.filter { $0.faces.count > 0 }.reduce(0) { $0 + $1.vertices.count },
+                triangleCount: portableScan.meshAnchors.reduce(0) { $0 + $1.faces.count }
             )
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -152,5 +166,7 @@ final class ObjSerializer: ObservableObject {
         let nativeFormatVersion: Int32
         let meshUnits: String
         let meshCoordinates: String
+        let vertexCount: Int
+        let triangleCount: Int
     }
 }

@@ -17,10 +17,10 @@ struct MiniWorldRender: View {
     var scan: ScanFile
     var settings: SettingsStore
 
-    @ObservedObject
+    @StateObject
     private var snapshotModel = SnapshotExportModel()
 
-    @ObservedObject
+    @StateObject
     private var renderModel = GeneralRenderModel()
 
     var body: some View {
@@ -31,7 +31,6 @@ struct MiniWorldRender: View {
         .snapshotMenus(for: _snapshotModel)
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
-                [unowned snapshotModel, unowned renderModel, unowned imageSharer] in
                 snapshotModel.promptButton(scan: scan, sharer: imageSharer)
                 renderModel.doubleSidedButton()
             }
@@ -44,40 +43,23 @@ struct MiniWorldRender: View {
     }
 }
 
-final class MiniWorldRenderController :
-    UIViewController, UIViewRepresentable, SCNSceneRendererDelegate {
-
-    unowned var snapshotModel: SnapshotExportModel
-    unowned var renderModel: GeneralRenderModel
-
-    init(
-        renderModel: GeneralRenderModel,
-        snapshotModel: SnapshotExportModel
-    ) {
-        self.renderModel = renderModel
-        self.snapshotModel = snapshotModel
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
+private struct MiniWorldRenderController: UIViewRepresentable {
+    let renderModel: GeneralRenderModel
+    let snapshotModel: SnapshotExportModel
 
     func makeUIView(context: Context) -> SCNView {
         let sceneView = SCNView(frame: .zero)
         sceneView.backgroundColor = UIColor.systemBackground
 
         sceneView.scene = makeaScene()
-
-        sceneView.showsStatistics = true
-
-        sceneView.delegate = self
+        sceneView.pointOfView = sceneView.scene?.rootNode.childNode(
+            withName: GeneralRenderModel.cameraNodeName, recursively: false
+        )
 
         sceneView.allowsCameraControl = true
         sceneView.defaultCameraController.interactionMode =
             self.renderModel.interactionMode3d
         sceneView.autoenablesDefaultLighting = true
-        sceneView.isPlaying = true
 
         return sceneView
     }
@@ -95,12 +77,11 @@ final class MiniWorldRenderController :
         let scene = SCNScene()
 
         let cameraNode = SCNNode()
-        cameraNode.name = "the-camera"
+        cameraNode.name = GeneralRenderModel.cameraNodeName
         cameraNode.camera = SCNCamera()
         cameraNode.position = SCNVector3(x: 0, y: 10, z: 35)
 
         scene.rootNode.addChildNode(cameraNode)
-
 
         renderModel.sceneNodes.forEach {
             node in
@@ -108,7 +89,7 @@ final class MiniWorldRenderController :
         }
 
         let ambientLightNode = SCNNode()
-        ambientLightNode.name = "ambient-light"
+        ambientLightNode.name = GeneralRenderModel.ambientLightNodeName
         ambientLightNode.light = SCNLight()
         ambientLightNode.light!.type = .ambient
         if let ambientColor = renderModel.ambientColor {

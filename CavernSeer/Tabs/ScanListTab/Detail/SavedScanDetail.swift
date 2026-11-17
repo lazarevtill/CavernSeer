@@ -24,10 +24,9 @@ struct SavedScanDetail: View {
     private struct ShareArtifact: Identifiable {
         let id = UUID()
         let url: URL
-        let temporary: Bool
 
         func cleanup() {
-            if temporary { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
         }
     }
 
@@ -36,20 +35,23 @@ struct SavedScanDetail: View {
     @State private var exportError: String?
     @State private var showExportError = false
 
-    private func loadModel() {
-        if let err = self.cache.error {
-            self.error = err
-            return
+    @MainActor private func loadModel() async {
+        let url = scanStore.getNormalizedRealUrl(cache: cache)
+        do {
+            let latest = try await Self.readModel(at: url)
+            try Task.checkCancellation()
+            error = nil
+            model = latest
+        } catch is CancellationError {
+            // A newer selection or navigation cancelled this read.
+        } catch {
+            guard !Task.isCancelled else { return }
+            self.error = error
         }
+    }
 
-        let url = scanStore.getNormalizedRealUrl(cache: self.cache)
-        if self.model?.url != url {
-            do {
-                self.model = try scanStore.getModel(url: url)
-            } catch {
-                self.error = error
-            }
-        }
+    private nonisolated static func readModel(at url: URL) async throws -> SavedScanModel {
+        try SavedScanModel(url: url)
     }
 
     var body: some View {
@@ -59,8 +61,9 @@ struct SavedScanDetail: View {
 
             Spacer()
 
-            Text(model?.id ?? error?.localizedDescription ?? "Loading...")
-                .font(.title)
+            Text(model?.scan.name ?? error?.localizedDescription ?? "Loading scan…")
+                .font(.title2)
+                .multilineTextAlignment(.center)
                 .padding()
 
             if let model = self.model {
@@ -79,7 +82,7 @@ struct SavedScanDetail: View {
                                 startExport(.backup, model: model)
                             }
                             Button("Original scan only") {
-                                artifact = ShareArtifact(url: model.url, temporary: false)
+                                startExport(.native, model: model)
                             }
                             Button("OBJ mesh only") {
                                 startExport(.mesh, model: model)
@@ -105,7 +108,7 @@ struct SavedScanDetail: View {
         } message: {
             Text(exportError ?? "The original scan has not been changed.")
         }
-        .onAppear(perform: self.loadModel)
+        .task(id: cache.id) { await loadModel() }
         .onDisappear { exportTask?.cancel() }
     }
 
@@ -115,7 +118,7 @@ struct SavedScanDetail: View {
             defer { exportTask = nil }
             do {
                 let url = try await ObjSerializer.prepare(mode, model: model)
-                let item = ShareArtifact(url: url, temporary: true)
+                let item = ShareArtifact(url: url)
                 if Task.isCancelled {
                     item.cleanup()
                 } else {

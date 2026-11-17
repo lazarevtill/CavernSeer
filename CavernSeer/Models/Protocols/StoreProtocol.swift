@@ -8,6 +8,8 @@
 
 import Foundation
 
+private let previewRefreshQueue = DispatchQueue(label: "CavernSeer.preview-refresh", qos: .utility)
+
 /**
  * Abstracts the storage and handling of files and their caches.
  *
@@ -55,6 +57,11 @@ extension StoreProtocol {
      *  otherwise throws from the `ModelType` constructor.
      */
     func getModel(url: URL) throws -> ModelType {
+        // A rolling checkpoint is atomically replaced at the same URL. A URL
+        // alone cannot identify its revision; never serve a stale model.
+        if Self.isRollingRecovery(url) {
+            return try ModelType(url: url)
+        }
         if let model = modelDataInMemory.first(where: { $0.url == url }) {
             return model
         }
@@ -82,6 +89,7 @@ extension StoreProtocol {
               !base.contains("/"), !base.contains("\0")
         else { throw CocoaError(.fileWriteInvalidFileName) }
 
+        try ensureDataDirectory()
         let data = try NSKeyedArchiver.archivedData(withRootObject: file, requiringSecureCoding: true)
         if replaceExisting {
             // This path is reserved for rolling checkpoints. Replacing the prior
@@ -135,24 +143,31 @@ extension StoreProtocol {
      * Work is done async as utility, then data is updated back on main thread.
      * If `completion` is provided, it is called in that main thread.
      */
-    func update(completion: ((Error?)->())? = nil) {
-        let previousCaches = Dictionary(caches.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        DispatchQueue.global(qos: .utility).async {
+    func update(rebuildPreviews: Bool = false, completion: ((Error?)->())? = nil) {
+        let previousCaches = rebuildPreviews ? [:] :
+            Dictionary(caches.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        previewRefreshQueue.async {
             do {
                 let urls = try self.getStoreDirectoryURLs()
                 let newCaches = urls.map { url in
                     let id = url.deletingPathExtension().lastPathComponent
                     do {
-                        return try previousCaches[id] ?? self.getCacheFile(realFileURL: url)
+                        return try autoreleasepool {
+                            if !rebuildPreviews, let preview = previousCaches[id] { return preview }
+                            return try self.getCacheFile(realFileURL: url, readPersistentPreview: !rebuildPreviews)
+                        }
                     } catch {
                         return self.makeErrorCacheInstance(url, error: error)
                     }
                 }
 
                 DispatchQueue.main.async {
-                    let existingURLs = Set(urls)
+                    let surviving = zip(urls, newCaches).filter { url, _ in
+                        self.fileManager.fileExists(atPath: url.path)
+                    }
+                    let existingURLs = Set(surviving.map { $0.0 })
                     self.modelDataInMemory.removeAll { !existingURLs.contains($0.url) }
-                    self.caches = newCaches
+                    self.caches = surviving.map { $0.1 }
                     self.sortCaches()
                     completion?(nil)
                 }
@@ -163,41 +178,32 @@ extension StoreProtocol {
         }
     }
 
-    func deleteFile(id: String) {
-        let cacheIndex = caches.firstIndex { $0.id == id }
-        let modelIndex = modelDataInMemory.firstIndex { $0.id == id }
-
-        if cacheIndex != nil {
-            let cache = caches[cacheIndex!]
-            let dataUrl = self.getNormalizedRealUrl(cache: cache)
-            let cacheUrl = cache.getCacheURL(cacheDir: cacheDirectory)
-            do {
-                try fileManager.removeItem(at: cacheUrl)
-            } catch {
-                debugPrint("Deleting cacheUrl failed but that's okay", cacheUrl)
-            }
-            do {
-                try fileManager.removeItem(at: dataUrl)
-            } catch {
-                fatalError("Deletion failed: \(error.localizedDescription)")
-            }
-            caches.remove(at: cacheIndex!)
-        } else {
-            fatalError("Model not found in modelData")
+    /// Stage and validate a byte-for-byte copy; publish without replacing an
+    /// existing scan. Files may point to external documents, so never remove the source.
+    func importFile(from source: URL) throws -> URL {
+        let base = source.deletingPathExtension().lastPathComponent
+        guard !base.isEmpty, !base.hasPrefix("."), !base.contains("/"),
+              !base.contains("\0") else { throw CocoaError(.fileWriteInvalidFileName) }
+        let attributes = try source.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard attributes.isRegularFile == true, attributes.isSymbolicLink != true else {
+            throw CocoaError(.fileReadUnsupportedScheme)
         }
-
-        if modelIndex != nil {
-            modelDataInMemory.remove(at: modelIndex!)
+        try ensureDataDirectory()
+        let staging = dataDirectory.appendingPathComponent(".pending-import-\(UUID().uuidString)")
+            .appendingPathExtension(fileExtension)
+        defer { try? fileManager.removeItem(at: staging) }
+        try fileManager.copyItem(at: source, to: staging)
+        let model = try ModelType(url: staging)
+        let destination = baseNameToURL(base: base)
+        do {
+            try fileManager.linkItem(at: staging, to: destination)
+        } catch {
+            if fileManager.fileExists(atPath: destination.path) { throw FileSaveError.AlreadyExists }
+            throw error
         }
-    }
-
-    func importFile(model: ModelType) throws -> URL {
-        if caches.contains(where: { $0.id == model.id }) {
-            throw FileSaveError.AlreadyExists
-        }
-
-        let file = model.getFile()
-        return try saveFile(file: file, baseName: model.id)
+        let cache = model.getFile().createCacheFile(thisFileURL: destination)
+        saveCacheBestEffort(cache, at: cache.getCacheURL(cacheDir: cacheDirectory))
+        return destination
     }
 
     func clearCaches() throws {
@@ -205,11 +211,6 @@ extension StoreProtocol {
         caches.removeAll()
         modelDataInMemory.removeAll()
         _ = getOrCreateDirectories()
-    }
-
-    internal func DANGEROUSLY_deleteAllFiles() throws {
-        try fileManager.removeItem(at: dataDirectory)
-        try clearCaches()
     }
 
     internal func getSaveURL(file: FileType, baseName: String? = nil) -> URL {
@@ -238,7 +239,7 @@ extension StoreProtocol {
      * Tries to get the cache file associated with a real file.
      * If the cache file doesn't exist but the real file does, generate the cache file and save it too.
      */
-    internal func getCacheFile(realFileURL: URL) throws -> CacheType {
+    internal func getCacheFile(realFileURL: URL, readPersistentPreview: Bool = true) throws -> CacheType {
         let id = realFileURL.deletingPathExtension().lastPathComponent
 
         let cacheFileURL =
@@ -246,7 +247,7 @@ extension StoreProtocol {
                 .appendingPathComponent(id)
                 .appendingPathExtension(CacheType.fileExtension)
 
-        if let data = try? Data(contentsOf: cacheFileURL),
+        if readPersistentPreview, let data = try? Data(contentsOf: cacheFileURL),
            let cache = try? NSKeyedUnarchiver.unarchivedObject(ofClass: CacheType.self, from: data),
            cache.id == id {
             cache.realFileURL = realFileURL
@@ -260,36 +261,37 @@ extension StoreProtocol {
         return cache
     }
 
-    /**
-     * Create the file and cache directories, and return them as a tuple.
-     * Returns `(fileDirectory, cacheDirectory)`
-     */
+    /// Determine stable sandbox paths and create them if possible without
+    /// making the app unlaunchable when protected storage or disk space is unavailable.
     internal func getOrCreateDirectories() -> (URL, URL) {
-        do {
-            let fileDirectory = try
-                fileManager
-                    .url(for: .documentDirectory,
-                         in: .userDomainMask,
-                         appropriateFor: nil,
-                         create: true)
-                .appendingPathComponent(directoryName, isDirectory: true)
-            let cacheBase = (try? fileManager.url(
-                for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true
-            )) ?? fileManager.temporaryDirectory
-            let cacheDirectory = cacheBase.appendingPathComponent(directoryName, isDirectory: true)
+        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent("Documents", isDirectory: true)
+        let fileDirectory = documents.appendingPathComponent(directoryName, isDirectory: true)
+        let cacheBase = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
+        let cacheDirectory = cacheBase.appendingPathComponent(directoryName, isDirectory: true)
 
-            try fileManager.createDirectory(at: fileDirectory, withIntermediateDirectories: true)
-            try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        // New documents always use Documents. If creating it failed, retries in
+        // save/import surface the real error rather than writing to temporary storage.
+        try? fileManager.createDirectory(at: fileDirectory, withIntermediateDirectories: true)
+        try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        return (fileDirectory, cacheDirectory)
+    }
 
-            return (fileDirectory, cacheDirectory)
-        } catch {
-            fatalError("Could not resolve file dataDirectory URL; " +
-                       "\(error.localizedDescription)")
-        }
+    private func ensureDataDirectory() throws {
+        try fileManager.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+    }
+
+    private static func isRollingRecovery(_ url: URL) -> Bool {
+        let id = url.deletingPathExtension().lastPathComponent
+        let prefix = "recovery_"
+        return id.hasPrefix(prefix) && UUID(uuidString: String(id.dropFirst(prefix.count))) != nil
     }
 
     internal func getStoreDirectoryURLs() throws -> [URL] {
-        try fileManager.contentsOfDirectory(
+        try ensureDataDirectory()
+        return try fileManager.contentsOfDirectory(
             at: dataDirectory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
         )
         .filter { $0.pathExtension == fileExtension }

@@ -22,11 +22,13 @@ final class CSMeshSlice : NSObject, NSSecureCoding {
     let normals: CSMeshGeometrySource
 
     init?(coder decoder: NSCoder) {
-        self.identifier = decoder.decodeObject(
-            of: NSUUID.self,
-            forKey: "identifier"
-        )! as UUID
-        self.transform = decoder.decode_simd_float4x4(prefix: "transform")
+        guard let identifier = decoder.decodeObject(of: NSUUID.self, forKey: "identifier") else { return nil }
+        self.identifier = identifier as UUID
+        let transform = decoder.decode_simd_float4x4(prefix: "transform")
+        self.transform = transform
+        guard (0..<4).allSatisfy({ column in
+            (0..<4).allSatisfy { transform[column][$0].isFinite }
+        }) else { return nil }
         let vert = decoder.decodeObject(
             of: CSMeshGeometrySource.self,
             forKey: "vertices"
@@ -40,13 +42,15 @@ final class CSMeshSlice : NSObject, NSSecureCoding {
             forKey: "normals"
         )
 
-        if vert == nil || fac == nil || normals == nil {
-            return nil
-        }
+        guard let vert = vert, let fac = fac, let normals = normals,
+              vert.semantic == .vertex, normals.semantic == .normal,
+              vert.format == .float3, normals.format == .float3,
+              vert.count == normals.count, fac.indicesFit(vertexCount: vert.count)
+        else { return nil }
 
-        self.vertices = vert!
-        self.faces = fac!
-        self.normals = normals!
+        self.vertices = vert
+        self.faces = fac
+        self.normals = normals
     }
 
     init(anchor: ARMeshAnchor) {
@@ -95,8 +99,11 @@ final class CSMeshGeometrySource : NSObject, NSSecureCoding {
         offset = decoder.decodeInteger(forKey: "offset")
         stride = decoder.decodeInteger(forKey: "stride")
 
+        let rawFormat = decoder.decodeInt64(forKey: "format")
         guard
-            let fmt = MTLVertexFormat(rawValue: UInt(decoder.decodeInt64(forKey: "format"))),
+            let raw = UInt(exactly: rawFormat),
+            let fmt = MTLVertexFormat(rawValue: raw),
+            Self.supportedMTLVertexFormat.contains(fmt),
             let dat = decoder.decodeObject(
                 of: NSData.self,
                 forKey: "data"
@@ -104,11 +111,21 @@ final class CSMeshGeometrySource : NSObject, NSSecureCoding {
             let rawSem = decoder.decodeObject(
                 of: NSString.self,
                 forKey: "semantic"
-            ) as String?
+            ) as String?,
+            let semantic = semanticFromRaw(raw: rawSem),
+            let componentIndex = Self.supportedMTLVertexFormat.firstIndex(of: fmt),
+            componentsPerVector == componentIndex + 1,
+            bytesPerComponent == MemoryLayout<Float>.size,
+            count >= 0, offset >= 0, offset <= dat.count
+        else { return nil }
+        let width = bytesPerComponent * componentsPerVector
+        guard stride >= width,
+              count == 0 || (width <= dat.count - offset &&
+                count - 1 <= (dat.count - offset - width) / stride)
         else { return nil }
         format = fmt
         data = dat
-        semantic = semanticFromRaw(raw: rawSem)
+        self.semantic = semantic
     }
 
     init(scn: SCNGeometrySource) {
@@ -194,6 +211,32 @@ final class CSMeshGeometryElement : NSObject, NSSecureCoding {
         bytesPerIndex = decoder.decodeInteger(forKey: "bytesPerIndex")
         count = decoder.decodeInteger(forKey: "count")
         indexCountPerPrimitive = decoder.decodeInteger(forKey: "indexCountPerPrimitive")
+        guard [1, 2, 4].contains(bytesPerIndex), count >= 0,
+              (primitiveType == .triangles && indexCountPerPrimitive == 3) ||
+                (primitiveType == .line && indexCountPerPrimitive == 2),
+              count <= data.count / (bytesPerIndex * indexCountPerPrimitive)
+        else { return nil }
+    }
+
+    /// Only inspect the index data described by the header. ARKit and legacy
+    /// fixtures may have extra allocation padding after the final primitive.
+    func indicesFit(vertexCount: Int) -> Bool {
+        if count == 0 { return true }
+        guard vertexCount > 0 else { return false }
+        return data.withUnsafeBytes { bytes in
+            for index in 0..<(count * indexCountPerPrimitive) {
+                let offset = index * bytesPerIndex
+                let vertex: UInt32
+                switch bytesPerIndex {
+                case 1: vertex = UInt32(bytes.loadUnaligned(fromByteOffset: offset, as: UInt8.self))
+                case 2: vertex = UInt32(UInt16(littleEndian: bytes.loadUnaligned(fromByteOffset: offset, as: UInt16.self)))
+                case 4: vertex = UInt32(littleEndian: bytes.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
+                default: return false
+                }
+                guard Int(vertex) < vertexCount else { return false }
+            }
+            return true
+        }
     }
 
     init(scn: SCNGeometryElement) {
@@ -240,7 +283,7 @@ fileprivate extension ARGeometryPrimitiveType {
     }
 }
 
-fileprivate func semanticFromRaw(raw: String) -> CSMeshGeometrySource.Semantic {
+fileprivate func semanticFromRaw(raw: String) -> CSMeshGeometrySource.Semantic? {
     switch raw {
         case CSMeshGeometrySource.Semantic.normal.rawValue:
             return .normal
@@ -249,6 +292,6 @@ fileprivate func semanticFromRaw(raw: String) -> CSMeshGeometrySource.Semantic {
         case CSMeshGeometrySource.Semantic.texcoord.rawValue:
             return .texcoord
         default:
-            fatalError("Unexpected Semantic \(raw)")
+            return nil
     }
 }

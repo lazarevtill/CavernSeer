@@ -26,7 +26,7 @@ struct SavedProjectModel: Identifiable, Hashable, SavedStoredFileProtocol {
         self.url = url
         id = url.deletingPathExtension().lastPathComponent
 
-        let data = try Data(contentsOf: url)
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
         self.fileSize = Int64(data.count)
         guard let project = try NSKeyedUnarchiver.unarchivedObject(
                 ofClass: ProjectFile.self,

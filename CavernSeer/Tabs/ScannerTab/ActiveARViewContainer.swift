@@ -42,7 +42,7 @@ struct ActiveARViewContainer: UIViewRepresentable {
 
 extension ActiveARViewContainer {
     class Coordinator {
-        weak var control: ScannerControlModel?
+        let control: ScannerControlModel?
 
         init(control: ScannerControlModel?) {
             self.control = control

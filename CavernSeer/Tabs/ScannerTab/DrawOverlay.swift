@@ -28,8 +28,6 @@ class DrawOverlay: UIView {
 
         guard let toDraw = self.toDraw else { return }
 
-        defer { setNeedsDisplay() }
-
         if let context = UIGraphicsGetCurrentContext() {
 
             //if clearing {

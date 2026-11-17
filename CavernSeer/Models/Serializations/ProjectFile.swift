@@ -35,22 +35,16 @@ final class ProjectFile : NSObject, StoredFileProtocol {
         let version = decoder.decodeInt32(forKey: PropertyKeys.version)
         self.encodingVersion = version
 
-        if (version == 1) {
-            self.timestamp = decoder.decodeObject(
-                of: NSDate.self,
-                forKey: PropertyKeys.timestamp
-            )! as Date
-            self.name = decoder.decodeObject(
-                of: NSString.self,
-                forKey: PropertyKeys.name
-            )! as String
-            self.scans = decoder.decodeObject(
-                of: [NSArray.self, ProjectScanRelation.self],
-                forKey: PropertyKeys.scans
-            ) as! [ProjectScanRelation]
-        } else {
-            fatalError("Unexpected encoding version \(version)")
-        }
+        guard version == Self.currentEncodingVersion,
+              let timestamp = decoder.decodeObject(of: NSDate.self, forKey: PropertyKeys.timestamp),
+              let name = decoder.decodeObject(of: NSString.self, forKey: PropertyKeys.name),
+              let scans = decoder.decodeObject(
+                of: [NSArray.self, ProjectScanRelation.self], forKey: PropertyKeys.scans
+              ) as? [ProjectScanRelation]
+        else { return nil }
+        self.timestamp = timestamp as Date
+        self.name = name as String
+        self.scans = scans
     }
 
     func encode(with coder: NSCoder) {
@@ -107,19 +101,12 @@ extension ProjectFile {
             let version = decoder.decodeInt32(forKey: PropertyKeys.version)
             self.encodingVersion = version
 
-            if version == 1 {
-                self.scan = decoder.decodeObject(
-                    of: ScanFile.self,
-                    forKey: PropertyKeys.scan
-                )!
-                self.transform = decoder.decode_simd_float4x4(
-                    prefix: PropertyKeys.transform
-                )
-                self.positionedRelativeToScan =
-                    decoder.decodeInt32(forKey: PropertyKeys.positionedRelativeToScan)
-            } else {
-                fatalError("Unexpected encoding version \(version)")
-            }
+            guard version == ProjectFile.currentEncodingVersion,
+                  let scan = decoder.decodeObject(of: ScanFile.self, forKey: PropertyKeys.scan)
+            else { return nil }
+            self.scan = scan
+            self.transform = decoder.decode_simd_float4x4(prefix: PropertyKeys.transform)
+            self.positionedRelativeToScan = decoder.decodeInt32(forKey: PropertyKeys.positionedRelativeToScan)
         }
 
         func encode(with coder: NSCoder) {

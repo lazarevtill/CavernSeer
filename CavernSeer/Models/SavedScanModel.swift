@@ -26,7 +26,7 @@ struct SavedScanModel: Identifiable, Hashable, SavedStoredFileProtocol {
         self.url = url
         id = url.deletingPathExtension().lastPathComponent
 
-        let data = try Data(contentsOf: url)
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
         self.fileSize = Int64(data.count)
         guard let scan = try NSKeyedUnarchiver.unarchivedObject(
                 ofClass: ScanFile.self,

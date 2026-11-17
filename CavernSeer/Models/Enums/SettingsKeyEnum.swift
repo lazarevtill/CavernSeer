@@ -106,7 +106,7 @@ func getSettingsDefaultDictionary() -> [String:Any] {
         uniqueKeysWithValues:
             SettingsKey.allCases.compactMap {
                 if let encoded = try? $0.encodeValue(value: $0.defaultValue) {
-                    return ($0.name, encoded)
+                    return ($0.rawValue, encoded)
                 } else {
                     return nil as (String, Any)?
                 }

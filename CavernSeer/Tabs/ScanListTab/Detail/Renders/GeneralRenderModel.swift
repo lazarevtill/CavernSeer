@@ -95,23 +95,20 @@ class GeneralRenderModel : ObservableObject {
     }
 
     func doubleSidedButton() -> some View {
-        Button(action: {
+        Button {
             [weak self] in
-            self!.doubleSided.toggle()
-            self!.sceneNodes.forEach {
-                [unowned self] in
-                $0.geometry?.firstMaterial?.isDoubleSided = self!.doubleSided
+            guard let self = self else { return }
+            self.doubleSided.toggle()
+            let doubleSided = self.doubleSided
+            self.sceneNodes.forEach {
+                $0.geometry?.firstMaterial?.isDoubleSided = doubleSided
             }
-            self!.shouldUpdateNodes = true
-            self!.shouldUpdateView = true
-        }) {
-            [unowned self] in
-            Image(
-                systemName: self.doubleSided
-                    ? "square.on.square"
-                    : "square.on.square.dashed"
-            )
+            self.shouldUpdateNodes = true
+            self.shouldUpdateView = true
+        } label: {
+            Image(systemName: doubleSided ? "square.on.square" : "square.on.square.dashed")
         }
+        .accessibilityLabel("Show both sides of the mesh")
     }
 
     func setSettings(_ settings: SettingsStore) {

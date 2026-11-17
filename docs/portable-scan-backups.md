@@ -11,14 +11,14 @@ Use **Original scan only** if a scan cannot produce a valid OBJ.
 The ZIP contains these files (an enclosing folder may appear on extraction):
 
 - `CavernSeer-….cavernseerscan`: byte-for-byte original. Reimport it into CavernSeer to
-  recover saved survey stations, lines and snapshots, if present. Each export
+  recover saved survey stations, lines and snapshots, if present. Extract the ZIP in Files first, then share/open the native file in CavernSeer or choose **Import scan from Files** in Scan List. Each export
   uses a unique name so multiple backup archives can be reimported.
 - `mesh.obj`: portable triangle mesh, in meters, in local ARKit capture
   coordinates with +Y up. It contains geometry, not survey annotations,
   photos, per-frame depth samples, or a georeferenced map. Open it in
   Blender and check orientation and scale before aligning it with another
   scan or converting to GLB.
-- `metadata.json`: date, native format version and export coordinate convention.
+- `metadata.json`: date, native format version, mesh counts and export coordinate convention.
 - `SHA256SUMS`: checksums of all three files. On the Mac, open Terminal in the
   extracted folder and run `shasum -a 256 -c SHA256SUMS`. A failed check means
   the copy should not be treated as your backup.

@@ -62,29 +62,64 @@ final class ScannerModel:
     private var lifecycleSubscription: AnyCancellable?
     private var checkpointPolicy = CheckpointPolicy()
     private var meshRevision = 0
-    private var checkpointInFlight = false
+    private var activeCheckpoint: RecoveryWrite?
+    private var pendingCheckpoint: RecoveryWrite?
+    private var activeRetryLease: CaptureWriteLease?
+    private var previousIdleTimerDisabled: Bool?
+    private var trackingStatus = ""
+    private weak var scannerControl: ScannerControlModel?
     private var finalSaveRequested = false
     private var trackingEnded = false
-    private var onCheckpointStatus: ((String) -> Void)?
 
     struct CheckpointPolicy {
+        struct Version: Equatable {
+            let generation: UUID
+            let revision: Int
+            let anchors: Set<UUID>
+        }
+
         static let interval: TimeInterval = 25
         private(set) var lastDate: Date?
         private(set) var anchorIDs: Set<UUID> = []
         private(set) var revision: Int?
+        private var committedGeneration: UUID?
 
-        func shouldWrite(revision: Int, anchors: Set<UUID>, now: Date, urgent: Bool) -> Bool {
-            guard !anchors.isEmpty, revision != self.revision, anchorIDs.isSubset(of: anchors) else {
-                return false
-            }
-            return urgent || (lastDate.map { now.timeIntervalSince($0) >= Self.interval } ?? true)
+        /// The newest issued revision, including a pending write, determines the
+        /// destination. A reduced anchor set must never replace a broader file.
+        func nextVersion(
+            revision: Int, anchors: Set<UUID>, now: Date, urgent: Bool,
+            outstanding: Version?, initialGeneration: UUID, nextGeneration: () -> UUID = { UUID() }
+        ) -> Version? {
+            let precedingRevision = outstanding?.revision ?? self.revision
+            guard !anchors.isEmpty, precedingRevision.map({ revision > $0 }) ?? true,
+                  urgent || (lastDate.map { now.timeIntervalSince($0) >= Self.interval } ?? true)
+            else { return nil }
+            let coverage = outstanding?.anchors ?? anchorIDs
+            let destination = coverage.isSubset(of: anchors)
+                ? (outstanding?.generation ?? committedGeneration ?? initialGeneration)
+                : nextGeneration()
+            return Version(generation: destination, revision: revision, anchors: anchors)
         }
 
-        mutating func didWrite(revision: Int, anchors: Set<UUID>, date: Date) {
+        /// A write that uses the original destination must retain its coverage.
+        func shouldWrite(revision: Int, anchors: Set<UUID>, now: Date, urgent: Bool) -> Bool {
+            !anchors.isEmpty && revision != self.revision && anchorIDs.isSubset(of: anchors)
+                && (urgent || (lastDate.map { now.timeIntervalSince($0) >= Self.interval } ?? true))
+        }
+
+        mutating func didWrite(revision: Int, anchors: Set<UUID>, date: Date, generation: UUID? = nil) {
             self.lastDate = date
             self.anchorIDs = anchors
             self.revision = revision
+            self.committedGeneration = generation
         }
+    }
+
+    private struct RecoveryWrite {
+        let file: ScanFile
+        let version: CheckpointPolicy.Version
+        let lease: CaptureWriteLease
+        var isRetry = false
     }
 
     /// A short OS background lease for an already assembled snapshot, not a
@@ -111,9 +146,7 @@ final class ScannerModel:
     init(control: ScannerControlModel) {
 
         super.init(target: nil, action: nil)
-        self.onCheckpointStatus = { [weak control] status in
-            control?.updateCheckpointStatus(status)
-        }
+        self.scannerControl = control
 
         control.$meshEnabled.sink {
             [weak self] (mesh) in self?.showMesh(mesh)
@@ -133,6 +166,12 @@ final class ScannerModel:
 
     func onViewAppear(arView: ARView, scanStore: ScanStore) {
         self.scanStore = scanStore
+        #if !targetEnvironment(simulator)
+        if previousIdleTimerDisabled == nil {
+            previousIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
+        #endif
         let surveyLines = DrawableContainer()
         let drawView = DrawOverlay(frame: arView.frame, toDraw: surveyLines)
 
@@ -165,7 +204,11 @@ final class ScannerModel:
     }
 
     func onViewDisappear() {
-        checkpoint(urgent: true, refreshList: true)
+        checkpoint(urgent: true)
+        if let previous = previousIdleTimerDisabled {
+            UIApplication.shared.isIdleTimerDisabled = previous
+            previousIdleTimerDisabled = nil
+        }
         checkpointTimer?.invalidate()
         checkpointTimer = nil
         lifecycleSubscription?.cancel()
@@ -227,22 +270,32 @@ final class ScannerModel:
         }
     }
 
-    /// Rolling, independently reopenable native backup per capture. Never
-    /// replace it with a snapshot that has lost previously committed anchors.
-    private func checkpoint(urgent: Bool = false, refreshList: Bool = false) {
+    private func reportRecovery(_ status: String) {
+        guard let control = scannerControl,
+              control.model == nil || control.model === self else { return }
+        control.updateCheckpointStatus(status)
+    }
+
+    /// Keep one writer and at most one pending snapshot. Urgent callers freeze
+    /// bytes before dismantling AR; repeated callbacks replace only the pending
+    /// candidate (never a committed file).
+    private func checkpoint(urgent: Bool = false) {
         #if !targetEnvironment(simulator)
-        guard !finalSaveRequested, !checkpointInFlight, let scanStore = scanStore,
+        guard !finalSaveRequested, urgent || activeCheckpoint == nil, let scanStore = scanStore,
               let arView = arView, let surveyLines = surveyLines else { return }
-        let anchors = savedAnchors.snapshot
-        let ids = Set(anchors.map(\.identifier))
-        let revision = meshRevision
-        let now = Date()
-        guard checkpointPolicy.shouldWrite(revision: revision, anchors: ids, now: now, urgent: urgent) else {
-            if !checkpointPolicy.anchorIDs.isSubset(of: ids) {
-                onCheckpointStatus?("Tracking changed. The earlier recovery copy was kept.")
-            }
+        if urgent, pendingCheckpoint == nil, let active = activeCheckpoint,
+           active.version.revision == meshRevision {
+            // The in-flight file already contains these bytes. Keep one
+            // conditional retry through teardown instead of writing twice.
+            if !active.isRetry, activeRetryLease == nil { activeRetryLease = CaptureWriteLease() }
             return
         }
+        let anchors = savedAnchors.snapshot
+        let baseline = pendingCheckpoint?.version ?? activeCheckpoint?.version
+        guard let version = checkpointPolicy.nextVersion(
+            revision: meshRevision, anchors: Set(anchors.map(\.identifier)), now: Date(),
+            urgent: urgent, outstanding: baseline, initialGeneration: captureID
+        ) else { return }
 
         let lease = CaptureWriteLease()
         let name = ScanFile.makeDefaultBaseName(with: captureDate, as: ScanFile.dateFormatter)
@@ -251,31 +304,65 @@ final class ScannerModel:
             endSnap: urgent ? SnapshotAnchor(capturing: arView.session, suffix: "end") : nil,
             date: captureDate, stations: surveyStations,
             lines: surveyLines.drawables.compactMap { $0 as? SurveyLineEntity },
-            name: "Recovery • " + name + " [" + String(captureID.uuidString.prefix(8)) + "]"
+            name: "Recovery • " + name + " [" + String(version.generation.uuidString.prefix(8)) + "]"
         ) else { lease.finish(); return }
-        checkpointInFlight = true
-        let baseName = "recovery_" + captureID.uuidString
-        writeQueue.async { [weak self] in
-            let result = Result { try scanStore.saveRecoveryCheckpoint(file: file, baseName: baseName) }
-            DispatchQueue.main.async { [weak self] in
-                defer { lease.finish() }
-                self?.checkpointInFlight = false
+
+        let write = RecoveryWrite(file: file, version: version, lease: lease)
+        if activeCheckpoint != nil {
+            pendingCheckpoint?.lease.finish()
+            pendingCheckpoint = write
+        } else {
+            writeCheckpoint(write, to: scanStore)
+        }
+        #endif
+    }
+
+    private func writeCheckpoint(_ write: RecoveryWrite, to scanStore: ScanStore) {
+        activeCheckpoint = write
+        let version = write.version
+        // Keep the model alive until the pending checkpoint drains, including
+        // when switching away has already dismantled the view.
+        writeQueue.async { [self] in
+            let result = Result {
+                try scanStore.saveRecoveryCheckpoint(
+                    file: write.file, baseName: "recovery_" + version.generation.uuidString
+                )
+            }
+            DispatchQueue.main.async { [self] in
+                activeCheckpoint = nil
+                let retryLease = activeRetryLease
+                activeRetryLease = nil
+                write.lease.finish()
                 switch result {
                 case .success:
-                    self?.checkpointPolicy.didWrite(revision: revision, anchors: ids, date: Date())
-                    let savedAt = Date().formatted(date: .omitted, time: .standard)
-                    if self?.trackingEnded == true {
-                        self?.onCheckpointStatus?("Tracking ended. Recovery copy saved at \(savedAt).")
-                    } else {
-                        self?.onCheckpointStatus?("Recovery copy saved at \(savedAt).")
+                    let now = Date()
+                    checkpointPolicy.didWrite(
+                        revision: version.revision, anchors: version.anchors,
+                        date: now, generation: version.generation
+                    )
+                    if !finalSaveRequested {
+                        let savedAt = now.formatted(date: .omitted, time: .standard)
+                        reportRecovery("Recovery copy saved at \(savedAt).")
                     }
-                    if refreshList || self?.arView == nil { scanStore.update() }
+                    if arView == nil { scanStore.update() }
                 case .failure:
-                    self?.onCheckpointStatus?("Recovery write failed. Previous recovery copies are unchanged.")
+                    if let retryLease, pendingCheckpoint == nil {
+                        writeCheckpoint(RecoveryWrite(
+                            file: write.file, version: write.version, lease: retryLease, isRetry: true
+                        ), to: scanStore)
+                        return
+                    }
+                    if !finalSaveRequested {
+                        reportRecovery("Recovery write failed. Previous recovery copies are unchanged.")
+                    }
+                }
+                retryLease?.finish()
+                if let next = pendingCheckpoint {
+                    pendingCheckpoint = nil
+                    writeCheckpoint(next, to: scanStore)
                 }
             }
         }
-        #endif
     }
 
     /// Snapshot geometry on the session delegate queue, then write off the UI thread.
@@ -333,12 +420,34 @@ final class ScannerModel:
                 }
             } catch {
                 let description = error.localizedDescription
+                // The normal final write can fail after UI teardown. Reuse
+                // the exact assembled mesh; do not depend on a surviving AR
+                // view or let this fallback overwrite another recovery file.
+                let fallbackID = UUID()
+                let recovery = ScanFile(
+                    name: "Recovery • " + scanFile.name + " [" + String(fallbackID.uuidString.prefix(8)) + "]",
+                    timestamp: scanFile.timestamp, center: scanFile.center, extent: scanFile.extent,
+                    meshAnchors: scanFile.meshAnchors, startSnapshot: scanFile.startSnapshot,
+                    endSnapshot: scanFile.endSnapshot, stations: scanFile.stations,
+                    lines: scanFile.lines, location: scanFile.location
+                )
+                let fallbackSucceeded = (try? scanStore.saveRecoveryCheckpoint(
+                    file: recovery, baseName: "recovery_" + fallbackID.uuidString
+                )) != nil
                 DispatchQueue.main.async { [weak self] in
                     lease.finish()
                     self?.finalSaveRequested = false
                     self?.resumeScan()
-                    self?.checkpoint(urgent: true)
-                    message("Couldn't save: \(description). Your scan is still open; try again.")
+                    if fallbackSucceeded {
+                        self?.reportRecovery("Recovery copy saved. Try saving the full scan again.")
+                        scanStore.update()
+                    } else {
+                        self?.checkpoint(urgent: true)
+                    }
+                    let hint = fallbackSucceeded
+                        ? "A recovery copy was saved."
+                        : "Try saving again before leaving the scanner."
+                    message("Couldn't save the full scan: \(description). \(hint)")
                     done(false)
                 }
             }
@@ -428,7 +537,7 @@ final class ScannerModel:
     func sessionWasInterrupted(_ session: ARSession) {
         trackingEnded = true
         checkpoint(urgent: true)
-        onCheckpointStatus?("Capture interrupted. Save this segment and start a new scan.")
+        reportTracking("Capture interrupted. Save this segment and start a new scan.")
     }
 
     func sessionInterruptionEnded(_ session: ARSession) {
@@ -439,14 +548,47 @@ final class ScannerModel:
     func session(_ session: ARSession, didFailWithError error: Error) {
         trackingEnded = true
         checkpoint(urgent: true)
-        onCheckpointStatus?("Tracking stopped. Save this segment before starting again.")
+        reportTracking("Tracking stopped: \(error.localizedDescription). Save this segment before starting again.")
+    }
+
+    private func reportTracking(_ status: String) {
+        guard trackingStatus != status else { return }
+        trackingStatus = status
+        guard let control = scannerControl, control.model === self else { return }
+        control.updateTrackingStatus(status)
+    }
+
+    func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
+        guard !trackingEnded, !finalSaveRequested else { return }
+        switch camera.trackingState {
+        case .normal:
+            reportTracking("")
+        case .notAvailable:
+            reportTracking("Tracking unavailable. Hold still and check lighting before moving.")
+        case .limited(let reason):
+            switch reason {
+            case .initializing:
+                reportTracking("Starting tracking…")
+            case .excessiveMotion:
+                reportTracking("Tracking limited: move more slowly.")
+            case .insufficientFeatures:
+                reportTracking("Tracking limited: add light or aim at a textured surface.")
+            case .relocalizing:
+                reportTracking("Tracking limited: hold still and check familiar surroundings.")
+            @unknown default:
+                reportTracking("Tracking limited. Move slowly and check lighting.")
+            }
+        }
     }
 
     private func setupScanConfig() {
-        scanConfiguration = ARWorldTrackingConfiguration()
-        scanConfiguration!.sceneReconstruction = .mesh
-        scanConfiguration!.environmentTexturing = .none
-        scanConfiguration!.worldAlignment = .gravityAndHeading
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.sceneReconstruction = .mesh
+        configuration.environmentTexturing = .none
+        // Vertically aligned and measured in meters; horizontal coordinates
+        // are local, not magnetic north (unreliable near metal and underground).
+        configuration.worldAlignment = .gravity
+        scanConfiguration = configuration
     }
 
     private func setupARView(arView: ARView) {
@@ -479,8 +621,6 @@ final class ScannerModel:
             let surveyLines = self.surveyLines,
             !surveyLines.drawables.isEmpty
         else { return }
-
-        print("updating scene...")
 
         surveyLines.drawables.forEach {
             line in line.prepareToDraw(arView: arView)

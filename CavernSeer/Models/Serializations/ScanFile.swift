@@ -66,6 +66,11 @@ final class ScanFile : NSObject, NSSecureCoding, StoredFileProtocol {
         }
         guard let box = bounds.box else { return nil }
 
+        let completedStations = stations.compactMap { SurveyStation(entity: $0) }
+        let stationIDs = Set(completedStations.map(\.identifier))
+        let completedLines = lines.compactMap { SurveyLine(entity: $0) }.filter {
+            stationIDs.contains($0.startIdentifier) && stationIDs.contains($0.endIdentifier)
+        }
         return ScanFile(
             name: name ?? Self.makeDefaultBaseName(with: date, as: Self.dateFormatter),
             timestamp: date,
@@ -74,8 +79,8 @@ final class ScanFile : NSObject, NSSecureCoding, StoredFileProtocol {
             meshAnchors: meshes,
             startSnapshot: startSnap.map { CSMeshSnapshot(snapshot: $0) },
             endSnapshot: endSnap.map { CSMeshSnapshot(snapshot: $0) },
-            stations: stations.map { SurveyStation(entity: $0) },
-            lines: lines.map { SurveyLine(entity: $0) },
+            stations: completedStations,
+            lines: completedLines,
             location: nil
         )
     }
@@ -119,12 +124,17 @@ final class ScanFile : NSObject, NSSecureCoding, StoredFileProtocol {
 
         let decoder = Decode(coder: coder)
         self.encodingVersion = decoder.version
+        guard self.encodingVersion == 1 || self.encodingVersion == Self.currentEncodingVersion else { return nil }
 
         do {
             self.timestamp = try decoder.timestamp()
             self.name = try decoder.name(timestamp: self.timestamp)
             self.center = decoder.center()
             self.extent = decoder.extent()
+            guard center.x.isFinite, center.y.isFinite, center.z.isFinite,
+                  extent.x.isFinite, extent.y.isFinite, extent.z.isFinite,
+                  extent.x >= 0, extent.y >= 0, extent.z >= 0
+            else { throw DecodeError.castFailure(property: "bounds") }
             self.meshAnchors = try decoder.meshAnchors()
             self.startSnapshot =
                 try decoder.snapshot(key: PropertyKeys.startSnapshot)
@@ -185,8 +195,8 @@ final class ScanFile : NSObject, NSSecureCoding, StoredFileProtocol {
         coder.encode(center, forPrefix: PropertyKeys.center)
         coder.encode(extent, forPrefix: PropertyKeys.extent)
         coder.encode(meshAnchors as NSArray, forKey: PropertyKeys.meshAnchors)
-        coder.encode(startSnapshot, forKey: PropertyKeys.startSnapshot)
-        coder.encode(endSnapshot, forKey: PropertyKeys.endSnapshot)
+        if let startSnapshot { coder.encode(startSnapshot, forKey: PropertyKeys.startSnapshot) }
+        if let endSnapshot { coder.encode(endSnapshot, forKey: PropertyKeys.endSnapshot) }
 
         coder.encode(stations as NSArray, forKey: PropertyKeys.stations)
         coder.encode(lines as NSArray, forKey: PropertyKeys.lines)
@@ -357,7 +367,7 @@ extension ScanFile {
                         throw DecodeError.castFailure(property: "meshes")
                     }
                 default:
-                    fatalError("Unexpected encoding version \(version)")
+                    throw DecodeError.badVersion
             }
         }
 
@@ -378,11 +388,9 @@ extension ScanFile {
                     default:
                         throw DecodeError.badVersion
                 }
-                if snapshot != nil {
-                    return snapshot!
-                } else {
-                    throw DecodeError.castFailure(property: key)
-                }
+                // Earlier writers encoded an explicit nil for optional photos.
+                // NSKeyedUnarchiver still reports such a key as present.
+                return snapshot
             } else {
                 return nil
             }
